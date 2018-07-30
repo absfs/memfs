@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/absfs/absfs"
+	"github.com/absfs/inode"
 )
 
 type File struct {
@@ -16,7 +17,8 @@ type File struct {
 
 	name  string
 	flags int
-	node  *inode
+	node  *inode.Inode
+	data  []byte
 
 	offset    int64
 	diroffset int
@@ -36,14 +38,14 @@ func (f *File) Read(p []byte) (int, error) {
 	if f.node.IsDir() {
 		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EISDIR} //os.ErrPermission
 	}
-	if f.offset >= int64(len(f.node.Data)) {
+	if f.offset >= int64(len(f.data)) {
 		return 0, io.EOF
 	}
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
 		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF} //os.ErrPermission
 	}
 
-	n := copy(p, f.node.Data[f.offset:])
+	n := copy(p, f.data[f.offset:])
 	f.offset += int64(n)
 	return n, nil
 
@@ -62,15 +64,15 @@ func (f *File) Write(p []byte) (int, error) {
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
 	}
-	data := f.node.Data
+	data := f.data
 	size := len(p) + int(f.offset)
 	if size > len(data) {
 		data = make([]byte, size)
-		copy(data, f.node.Data)
+		copy(data, f.data)
 	}
 	n := copy(data[int(f.offset):], p)
 	f.offset += int64(n)
-	f.node.Data = data
+	f.data = data
 	return n, nil
 }
 
@@ -80,6 +82,11 @@ func (f *File) WriteAt(b []byte, off int64) (n int, err error) {
 }
 
 func (f *File) Close() error {
+	err := f.Sync()
+	if err != nil {
+		return err
+	}
+
 	f.node = nil
 	return nil
 }
@@ -91,7 +98,7 @@ func (f *File) Seek(offset int64, whence int) (ret int64, err error) {
 	case io.SeekCurrent:
 		f.offset += offset
 	case io.SeekEnd:
-		f.offset = int64(len(f.node.Data)) + offset
+		f.offset = int64(len(f.data)) + offset
 	}
 	if f.offset < 0 {
 		f.offset = 0
@@ -104,6 +111,11 @@ func (f *File) Stat() (os.FileInfo, error) {
 }
 
 func (f *File) Sync() error {
+	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
+		return nil
+	}
+	f.fs.data[int(f.node.Ino)] = f.data
+
 	return nil
 }
 
@@ -156,13 +168,13 @@ func (f *File) Truncate(size int64) error {
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return os.ErrPermission
 	}
-	if int(size) <= len(f.node.Data) {
-		f.node.Data = f.node.Data[:int(size)]
+	if int(size) <= len(f.data) {
+		f.data = f.data[:int(size)]
 		return nil
 	}
 	data := make([]byte, int(size))
-	copy(data, f.node.Data)
-	f.node.Data = data
+	copy(data, f.data)
+	f.data = data
 	return nil
 }
 
@@ -172,7 +184,7 @@ func (f *File) WriteString(s string) (n int, err error) {
 
 type fileinfo struct {
 	name string
-	node *inode
+	node *inode.Inode
 }
 
 func (i *fileinfo) Name() string {
@@ -180,7 +192,7 @@ func (i *fileinfo) Name() string {
 }
 
 func (i *fileinfo) Size() int64 {
-	return int64(len(i.node.Data))
+	return i.node.Size
 }
 
 func (i *fileinfo) ModTime() time.Time {

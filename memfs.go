@@ -9,27 +9,31 @@ import (
 	"time"
 
 	"github.com/absfs/absfs"
+	"github.com/absfs/inode"
 )
 
 type FileSystem struct {
 	Umask   os.FileMode
 	Tempdir string
 
-	root *inode
+	root *inode.Inode
 	cwd  string
-	dir  *inode
-	ino  *iNo
+	dir  *inode.Inode
+	ino  *inode.Ino
+
+	data [][]byte
 }
 
 func NewFS() (*FileSystem, error) {
 	fs := new(FileSystem)
-	fs.ino = new(iNo)
+	fs.ino = new(inode.Ino)
 	fs.Tempdir = "/tmp"
 
 	fs.Umask = 0755
-	fs.root = fs.ino.newDir(fs.Umask)
+	fs.root = fs.ino.NewDir(fs.Umask)
 	fs.cwd = "/"
 	fs.dir = fs.root
+	fs.data = make([][]byte, 2)
 	return fs, nil
 }
 
@@ -52,7 +56,7 @@ func (fs *FileSystem) Chdir(name string) (err error) {
 		wd = fs.dir
 	}
 
-	node, err := wd.resolve(name)
+	node, err := wd.Resolve(name)
 	if err != nil {
 		return &os.PathError{Op: "chdir", Path: name, Err: err}
 	}
@@ -83,10 +87,12 @@ func (fs *FileSystem) Create(name string) (absfs.File, error) {
 
 func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
 	if name == "/" {
-		return &File{fs: fs, name: name, flags: flag, node: fs.root}, nil
+		data := fs.data[int(fs.root.Ino)]
+		return &File{fs: fs, name: name, flags: flag, node: fs.root, data: data}, nil
 	}
 	if name == "." {
-		return &File{fs: fs, name: name, flags: flag, node: fs.dir}, nil
+		data := fs.data[int(fs.root.Ino)]
+		return &File{fs: fs, name: name, flags: flag, node: fs.dir, data: data}, nil
 	}
 
 	wd := fs.root
@@ -94,14 +100,14 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		wd = fs.dir
 	}
 	var exists bool
-	node, err := wd.resolve(name)
+	node, err := wd.Resolve(name)
 	if err == nil {
 		exists = true
 	}
 
 	dir, filename := filepath.Split(name)
 	dir = filepath.Clean(dir)
-	parent, err := wd.resolve(dir)
+	parent, err := wd.Resolve(dir)
 	if err != nil {
 		exists = false
 	}
@@ -113,9 +119,8 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	if !exists && !create {
 		return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.ENOENT}
 	}
-
 	if exists {
-
+		// fmt.Printf("node.Ino: %d of %d\n", int(node.Ino), len(fs.data))
 		// err if exclusive create is required
 		if create && flag&os.O_EXCL != 0 {
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EEXIST}
@@ -128,7 +133,7 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 
 		// if we must truncate the file
 		if truncate {
-			node.Data = node.Data[:0]
+			fs.data[int(node.Ino)] = fs.data[int(node.Ino)][:0]
 		}
 
 	} else { // !exists
@@ -138,13 +143,14 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		}
 
 		// Create write-able file
-		node = fs.ino.newFile(fs.Umask & perm)
+		node = fs.ino.New(fs.Umask & perm)
 		err := parent.Link(filename, node)
 		if err != nil {
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: err}
 		}
-
+		fs.data = append(fs.data, []byte{})
 	}
+	data := fs.data[int(node.Ino)]
 
 	if !create {
 		if access == os.O_RDONLY && node.Mode&absfs.OS_ALL_R == 0 ||
@@ -153,23 +159,24 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
 		}
 	}
-	return &File{fs: fs, name: name, flags: flag, node: node}, nil
+	return &File{fs: fs, name: name, flags: flag, node: node, data: data}, nil
 }
 
 func (fs *FileSystem) Truncate(name string, size int64) error {
-	path := abs(fs.cwd, name)
-	child, err := fs.root.resolve(path)
+	path := inode.Abs(fs.cwd, name)
+	child, err := fs.root.Resolve(path)
 	if err != nil {
 		return err
 	}
 
-	if size <= int64(len(child.Data)) {
-		child.Data = child.Data[:int(size)]
+	i := int(child.Ino)
+	if size <= child.Size {
+		fs.data[i] = fs.data[i][:int(size)]
 		return nil
 	}
 	data := make([]byte, int(size))
-	copy(data, child.Data)
-	child.Data = data
+	copy(data, fs.data[i])
+	fs.data[i] = data
 	return nil
 }
 
@@ -178,26 +185,27 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	if !filepath.IsAbs(name) {
 		wd = fs.dir
 	}
-	_, err := wd.resolve(name)
+	_, err := wd.Resolve(name)
 	if err == nil {
 		return &os.PathError{Op: "mkdir", Path: name, Err: os.ErrExist}
 	}
 
 	dir, filename := filepath.Split(name)
 	dir = filepath.Clean(dir)
-	parent, err := wd.resolve(dir)
+	parent, err := wd.Resolve(dir)
 	if err != nil {
 		return &os.PathError{Op: "mkdir", Path: dir, Err: err}
 	}
 
-	child := fs.ino.newDir(fs.Umask & perm)
+	child := fs.ino.NewDir(fs.Umask & perm)
 	parent.Link(filename, child)
 	child.Link("..", parent)
+	fs.data = append(fs.data, []byte{})
 	return nil
 }
 
 func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
-	name = abs(fs.cwd, name)
+	name = inode.Abs(fs.cwd, name)
 	path := ""
 	for _, p := range strings.Split(name, string(fs.Separator())) {
 		if p == "" {
@@ -210,11 +218,11 @@ func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
 }
 
 func (fs *FileSystem) Remove(name string) (err error) {
-	path := abs(fs.cwd, name)
+	path := inode.Abs(fs.cwd, name)
 	parent := fs.root
 	dir := filepath.Dir(path)
 	if dir != "/" {
-		parent, err = fs.root.resolve(strings.TrimLeft(dir, "/"))
+		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
 		if err != nil {
 			return &os.PathError{Op: "remove", Path: dir, Err: err}
 		}
@@ -223,13 +231,13 @@ func (fs *FileSystem) Remove(name string) (err error) {
 }
 
 func (fs *FileSystem) RemoveAll(name string) error {
-	path := abs(fs.cwd, name)
+	path := inode.Abs(fs.cwd, name)
 
 	if path == "/" {
 		fs.root.UnlinkAll()
 		return nil
 	}
-	node, err := fs.root.resolve(strings.TrimLeft(path, "/"))
+	node, err := fs.root.Resolve(strings.TrimLeft(path, "/"))
 
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -243,12 +251,12 @@ func (fs *FileSystem) RemoveAll(name string) error {
 }
 
 func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
-	name = abs(fs.cwd, name)
+	name = inode.Abs(fs.cwd, name)
 
 	if name == "/" {
 		return &fileinfo{"/", fs.root}, nil
 	}
-	node, err := fs.root.resolve(strings.TrimLeft(name, "/"))
+	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
 	if err != nil {
 		return nil, &os.PathError{Op: "remove", Path: name, Err: err}
 	}
@@ -257,8 +265,8 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 
 //Chmod changes the mode of the named file to mode.
 func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
-	name = abs(fs.cwd, name)
-	node, err := fs.root.resolve(strings.TrimLeft(name, "/"))
+	name = inode.Abs(fs.cwd, name)
+	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
 	if err != nil {
 		return err
 	}
@@ -268,8 +276,8 @@ func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
 
 //Chtimes changes the access and modification times of the named file
 func (fs *FileSystem) Chtimes(name string, atime time.Time, mtime time.Time) error {
-	name = abs(fs.cwd, name)
-	node, err := fs.root.resolve(strings.TrimLeft(name, "/"))
+	name = inode.Abs(fs.cwd, name)
+	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
 	if err != nil {
 		return err
 	}
@@ -280,8 +288,8 @@ func (fs *FileSystem) Chtimes(name string, atime time.Time, mtime time.Time) err
 
 //Chown changes the owner and group ids of the named file
 func (fs *FileSystem) Chown(name string, uid, gid int) error {
-	name = abs(fs.cwd, name)
-	node, err := fs.root.resolve(name)
+	name = inode.Abs(fs.cwd, name)
+	node, err := fs.root.Resolve(name)
 	if err != nil {
 		return err
 	}
