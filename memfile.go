@@ -59,9 +59,6 @@ func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
 
 func (f *File) Write(p []byte) (int, error) {
 
-	if f.flags == os.O_RDONLY|os.O_EXCL|os.O_SYNC|os.O_TRUNC {
-		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
-	}
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
 	}
