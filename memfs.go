@@ -109,8 +109,12 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	dir = filepath.Clean(dir)
 	parent, err := wd.Resolve(dir)
 	if err != nil {
-		exists = false
+		return nil, err
 	}
+
+	// if err != nil {
+	// 	exists = false
+	// }
 	access := flag & absfs.O_ACCESS
 	create := flag&os.O_CREATE != 0
 	truncate := flag&os.O_TRUNC != 0

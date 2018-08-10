@@ -1,7 +1,11 @@
 # memfs - In Memory File System
 The `memfs` package implements the `absfs.FileSystem` interface as a RAM backed filesystem.
 
-## Install 
+Care has been taken to insure that `memfs` returns identical errors both in text
+and type as the os package. This makes `memfs` particularly suited for use in
+testing.
+
+## Install
 
 ```bash
 $ go get github.com/absfs/memfs
@@ -23,8 +27,8 @@ func main() {
     fs, _ := memfs.NewFS() // remember kids don't ignore errors
 
     // Opens a file with read/write permissions in the current directory
-    f, _ := fs.Create("/example.txt")  
-    
+    f, _ := fs.Create("/example.txt")
+
     f.Write([]byte("Hello, world!"))
     f.Close()
 
@@ -32,8 +36,9 @@ func main() {
 }
 ```
 
+
 ## absfs
-Check out the [`absfs`](https://github.com/absfs/absfs) repo for more information about the abstract filesystem interface and features like filesystem composition 
+Check out the [`absfs`](https://github.com/absfs/absfs) repo for more information about the abstract filesystem interface and features like filesystem composition
 
 ## LICENSE
 

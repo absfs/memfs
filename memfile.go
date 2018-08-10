@@ -115,7 +115,7 @@ func (f *File) Sync() error {
 		return nil
 	}
 	f.fs.data[int(f.node.Ino)] = f.data
-
+	f.node.Size = int64(len(f.data))
 	return nil
 }
 
