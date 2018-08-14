@@ -129,11 +129,11 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		if create && flag&os.O_EXCL != 0 {
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EEXIST}
 		}
-		if node.IsDir() {
-			if access != os.O_RDONLY || truncate {
-				return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EISDIR} // os.ErrNotExist}
-			}
-		}
+		// if node.IsDir() {
+		// 	if access != os.O_RDONLY || truncate {
+		// 		return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EISDIR} // os.ErrNotExist}
+		// 	}
+		// }
 
 		// if we must truncate the file
 		if truncate {
@@ -269,10 +269,17 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 
 //Chmod changes the mode of the named file to mode.
 func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
+	var err error
+	node := fs.root
+
 	name = inode.Abs(fs.cwd, name)
-	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
-	if err != nil {
-		return err
+
+	return nil
+	if name != "/" {
+		node, err = fs.root.Resolve(strings.TrimLeft(name, "/"))
+		if err != nil {
+			return err
+		}
 	}
 	node.Mode = mode
 	return nil
@@ -280,11 +287,17 @@ func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
 
 //Chtimes changes the access and modification times of the named file
 func (fs *FileSystem) Chtimes(name string, atime time.Time, mtime time.Time) error {
+	var err error
+	node := fs.root
+
 	name = inode.Abs(fs.cwd, name)
-	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
-	if err != nil {
-		return err
+	if name != "/" {
+		node, err = fs.root.Resolve(strings.TrimLeft(name, "/"))
+		if err != nil {
+			return err
+		}
 	}
+
 	node.Atime = atime
 	node.Mtime = mtime
 	return nil
@@ -292,10 +305,15 @@ func (fs *FileSystem) Chtimes(name string, atime time.Time, mtime time.Time) err
 
 //Chown changes the owner and group ids of the named file
 func (fs *FileSystem) Chown(name string, uid, gid int) error {
+	var err error
+	node := fs.root
+
 	name = inode.Abs(fs.cwd, name)
-	node, err := fs.root.Resolve(name)
-	if err != nil {
-		return err
+	if name != "/" {
+		node, err = fs.root.Resolve(name)
+		if err != nil {
+			return err
+		}
 	}
 	node.Uid = uint32(uid)
 	node.Gid = uint32(gid)

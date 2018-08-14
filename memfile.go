@@ -35,14 +35,14 @@ func (f *File) Read(p []byte) (int, error) {
 	if f.flags == 3712 {
 		return 0, io.EOF
 	}
-	if f.node.IsDir() {
+	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
+		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF} //os.ErrPermission
+	}
+	if f.node.IsDir() && len(f.data) == 0 {
 		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EISDIR} //os.ErrPermission
 	}
 	if f.offset >= int64(len(f.data)) {
 		return 0, io.EOF
-	}
-	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
-		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF} //os.ErrPermission
 	}
 
 	n := copy(p, f.data[f.offset:])
