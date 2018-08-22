@@ -21,7 +21,8 @@ type FileSystem struct {
 	dir  *inode.Inode
 	ino  *inode.Ino
 
-	data [][]byte
+	symlinks map[uint64]string
+	data     [][]byte
 }
 
 func NewFS() (*FileSystem, error) {
@@ -43,6 +44,21 @@ func (fs *FileSystem) Separator() uint8 {
 
 func (fs *FileSystem) ListSeparator() uint8 {
 	return ':'
+}
+
+func (fs *FileSystem) Move(source, destination string) (err error) {
+	if source == "/" {
+		return errors.New("the root folder may not be moved or renamed")
+	}
+
+	if !filepath.IsAbs(source) {
+		source = filepath.Join(fs.cwd, source)
+	}
+	if !filepath.IsAbs(destination) {
+		destination = filepath.Join(fs.cwd, destination)
+	}
+
+	return fs.root.Move(source, destination)
 }
 
 func (fs *FileSystem) Chdir(name string) (err error) {
@@ -91,7 +107,7 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		return &File{fs: fs, name: name, flags: flag, node: fs.root, data: data}, nil
 	}
 	if name == "." {
-		data := fs.data[int(fs.root.Ino)]
+		data := fs.data[int(fs.dir.Ino)]
 		return &File{fs: fs, name: name, flags: flag, node: fs.dir, data: data}, nil
 	}
 
@@ -254,37 +270,6 @@ func (fs *FileSystem) RemoveAll(name string) error {
 	return nil
 }
 
-func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
-	name = inode.Abs(fs.cwd, name)
-
-	if name == "/" {
-		return &fileinfo{"/", fs.root}, nil
-	}
-	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
-	if err != nil {
-		return nil, &os.PathError{Op: "remove", Path: name, Err: err}
-	}
-	return &fileinfo{filepath.Base(name), node}, nil
-}
-
-//Chmod changes the mode of the named file to mode.
-func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
-	var err error
-	node := fs.root
-
-	name = inode.Abs(fs.cwd, name)
-
-	return nil
-	if name != "/" {
-		node, err = fs.root.Resolve(strings.TrimLeft(name, "/"))
-		if err != nil {
-			return err
-		}
-	}
-	node.Mode = mode
-	return nil
-}
-
 //Chtimes changes the access and modification times of the named file
 func (fs *FileSystem) Chtimes(name string, atime time.Time, mtime time.Time) error {
 	var err error
@@ -318,4 +303,93 @@ func (fs *FileSystem) Chown(name string, uid, gid int) error {
 	node.Uid = uint32(uid)
 	node.Gid = uint32(gid)
 	return nil
+}
+
+//Chmod changes the mode of the named file to mode.
+func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
+	var err error
+	node := fs.root
+
+	name = inode.Abs(fs.cwd, name)
+
+	return nil
+	if name != "/" {
+		node, err = fs.root.Resolve(strings.TrimLeft(name, "/"))
+		if err != nil {
+			return err
+		}
+	}
+	node.Mode = mode
+	return nil
+}
+
+// TODO: Avoid cyclical links
+func (fs *FileSystem) fileStat(cwd, name string) (*inode.Inode, error) {
+	name = inode.Abs(cwd, name)
+	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
+	if err != nil {
+		return nil, &os.PathError{Op: "remove", Path: name, Err: err}
+	}
+
+	if node.Mode&os.ModeSymlink == 0 {
+		return node, nil
+	}
+	return fs.fileStat(filepath.Dir(name), fs.symlinks[node.Ino])
+}
+
+func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
+	if name == "/" {
+		return &fileinfo{"/", fs.root}, nil
+	}
+	node, err := fs.fileStat(fs.cwd, name)
+	return &fileinfo{filepath.Base(name), node}, err
+}
+
+func (fs *FileSystem) Lstat(name string) (os.FileInfo, error) {
+	if name == "/" {
+		return &fileinfo{"/", fs.root}, nil
+	}
+	name = inode.Abs(fs.cwd, name)
+	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
+	if err != nil {
+		return nil, &os.PathError{Op: "remove", Path: name, Err: err}
+	}
+
+	return &fileinfo{filepath.Base(name), node}, nil
+}
+
+func (fs *FileSystem) Lchown(name string, uid, gid int) error {
+	if name == "/" {
+		fs.root.Uid = uint32(uid)
+		fs.root.Gid = uint32(gid)
+		return nil
+	}
+	name = inode.Abs(fs.cwd, name)
+	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
+	if err != nil {
+		return err
+	}
+
+	node.Uid = uint32(uid)
+	node.Gid = uint32(gid)
+	return nil
+}
+
+func (fs *FileSystem) Readlink(name string) (string, error) {
+	var ino uint64
+	if name == "/" {
+		ino = fs.root.Ino
+	} else {
+		node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
+		if err != nil {
+			return "", err
+		}
+		ino = node.Ino
+	}
+
+	return fs.symlinks[ino], nil
+}
+
+func (fs *FileSystem) Symlink(oldname, newname string) error {
+	return absfs.ErrNotImplemented
 }
