@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	filepath "path" // force forward slash separators on all OSs.
+	pathfilepath "path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -46,19 +48,30 @@ func (fs *FileSystem) ListSeparator() uint8 {
 	return ':'
 }
 
-func (fs *FileSystem) Move(source, destination string) (err error) {
-	if source == "/" {
-		return errors.New("the root folder may not be moved or renamed")
+func (fs *FileSystem) Rename(oldpath, newpath string) error {
+	linkErr := &os.LinkError{
+		Op:  "rename",
+		Old: oldpath,
+		New: newpath,
+	}
+	if oldpath == "/" {
+		linkErr.Err = errors.New("the root folder may not be moved or renamed")
+		return linkErr
 	}
 
-	if !filepath.IsAbs(source) {
-		source = filepath.Join(fs.cwd, source)
-	}
-	if !filepath.IsAbs(destination) {
-		destination = filepath.Join(fs.cwd, destination)
+	if !filepath.IsAbs(oldpath) {
+		oldpath = filepath.Join(fs.cwd, oldpath)
 	}
 
-	return fs.root.Move(source, destination)
+	if !filepath.IsAbs(newpath) {
+		newpath = filepath.Join(fs.cwd, newpath)
+	}
+	err := fs.root.Rename(oldpath, newpath)
+	if err != nil {
+		linkErr.Err = err
+		return linkErr
+	}
+	return nil
 }
 
 func (fs *FileSystem) Chdir(name string) (err error) {
@@ -145,11 +158,11 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		if create && flag&os.O_EXCL != 0 {
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EEXIST}
 		}
-		// if node.IsDir() {
-		// 	if access != os.O_RDONLY || truncate {
-		// 		return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EISDIR} // os.ErrNotExist}
-		// 	}
-		// }
+		if node.IsDir() {
+			if access != os.O_RDONLY || truncate {
+				return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EISDIR} // os.ErrNotExist}
+			}
+		}
 
 		// if we must truncate the file
 		if truncate {
@@ -312,7 +325,7 @@ func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
 
 	name = inode.Abs(fs.cwd, name)
 
-	return nil
+	// return nil
 	if name != "/" {
 		node, err = fs.root.Resolve(strings.TrimLeft(name, "/"))
 		if err != nil {
@@ -328,7 +341,7 @@ func (fs *FileSystem) fileStat(cwd, name string) (*inode.Inode, error) {
 	name = inode.Abs(cwd, name)
 	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
 	if err != nil {
-		return nil, &os.PathError{Op: "remove", Path: name, Err: err}
+		return nil, &os.PathError{Op: "stat", Path: name, Err: err}
 	}
 
 	if node.Mode&os.ModeSymlink == 0 {
@@ -391,5 +404,98 @@ func (fs *FileSystem) Readlink(name string) (string, error) {
 }
 
 func (fs *FileSystem) Symlink(oldname, newname string) error {
-	return absfs.ErrNotImplemented
+	wd := fs.root
+	if !filepath.IsAbs(newname) {
+		wd = fs.dir
+	}
+	var exists bool
+	newNode, err := wd.Resolve(newname)
+	if err == nil {
+		exists = true
+	}
+
+	if exists && newNode.Mode&os.ModeSymlink == 0 {
+		return &os.PathError{Op: "symlink", Path: newname, Err: syscall.EEXIST}
+	}
+	oldNode, err := wd.Resolve(oldname)
+	if err != nil {
+		return &os.PathError{Op: "symlink", Path: oldname, Err: syscall.ENOENT}
+	}
+
+	if exists {
+		newNode.Mode = oldNode.Mode | os.ModeSymlink
+		fs.symlinks[newNode.Ino] = oldname
+		return nil
+	}
+
+	dir, filename := filepath.Split(newname)
+	dir = filepath.Clean(dir)
+	parent, err := wd.Resolve(dir)
+	if err != nil {
+		return err
+	}
+
+	newNode = fs.ino.New(oldNode.Mode | os.ModeSymlink)
+
+	err = parent.Link(filename, newNode)
+	if err != nil {
+		return &os.PathError{Op: "symlink", Path: newname, Err: err}
+	}
+	fs.symlinks[newNode.Ino] = oldname
+	return nil
+}
+
+func (fs *FileSystem) Walk(name string, fn pathfilepath.WalkFunc) error {
+	var stack []string
+	push := func(path string) {
+		stack = append(stack, path)
+	}
+	pop := func() string {
+		path := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		return path
+	}
+
+	push(name)
+	for len(stack) > 0 {
+		path := pop()
+		info, err := fs.Stat(path)
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			f, err := fs.Open(path)
+			if err != nil {
+				return err
+			}
+
+			names, err := f.Readdirnames(-1)
+			f.Close()
+			if err != nil {
+				return err
+			}
+
+			sort.Sort(sort.Reverse(sort.StringSlice(names)))
+			for _, p := range names {
+				if p == ".." || p == "." {
+					continue
+				}
+				push(filepath.Join(path, p))
+			}
+		}
+
+		err = fn(path, info, nil)
+		if err != nil {
+			return err
+		}
+
+	}
+	return nil
+}
+
+func (fs *FileSystem) FastWalk(name string, fn absfs.FastWalkFunc) error {
+	return fs.Walk(name, func(path string, info os.FileInfo, err error) error {
+		return fn(path, info.Mode())
+	})
 }

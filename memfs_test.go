@@ -3,16 +3,170 @@ package memfs_test
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/absfs/absfs"
 	"github.com/absfs/fstesting"
 	"github.com/absfs/memfs"
+	"github.com/absfs/osfs/fastwalk"
 )
+
+func TestWalk(t *testing.T) {
+
+	fs, err := memfs.NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testpath := ".."
+	abs, err := filepath.Abs(testpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testpath = abs
+
+	err = filepath.Walk(testpath, func(path string, info os.FileInfo, err error) error {
+		p := strings.TrimPrefix(path, testpath)
+		if p == "" {
+			return nil
+		}
+		if info.IsDir() {
+			fs.MkdirAll(p, info.Mode())
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		fout, err := fs.Create(p)
+		if err != nil {
+			return err
+		}
+		defer fout.Close()
+		fin, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer fin.Close()
+		io.Copy(fout, fin)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Walk", func(t *testing.T) {
+		list := make(map[string]bool)
+		count := 0
+		err = filepath.Walk(testpath, func(path string, info os.FileInfo, err error) error {
+			p := strings.TrimPrefix(path, testpath)
+			if p == "" {
+				p = "/"
+			}
+			if info.Mode().IsDir() {
+				count++
+				list[p] = true
+				return nil
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+			list[p] = true
+			count++
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		count2 := 0
+		err = fs.Walk("/", func(path string, info os.FileInfo, err error) error {
+			if !list[path] {
+				return fmt.Errorf("file not found %q", path)
+			}
+			delete(list, path)
+			count2++
+			if count2 > count {
+				return fmt.Errorf("file count overflow")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		if count < 10 || count != count2 {
+			t.Errorf("incorrect file count: %d, %d", count, count2)
+		}
+		if len(list) > 0 {
+			i := 0
+
+			for k := range list {
+				i++
+				if i > 10 {
+					break
+				}
+				t.Errorf("path not removed %q", k)
+			}
+		}
+	})
+
+	t.Run("FastWalk", func(t *testing.T) {
+		list := make(map[string]bool)
+		count := 0
+		x := sync.Mutex{}
+		err = fastwalk.Walk(testpath, func(path string, mode os.FileMode) error {
+			defer x.Unlock()
+			x.Lock()
+			p := strings.TrimPrefix(path, testpath)
+			if p == "" {
+				p = "/"
+			}
+			if mode.IsDir() {
+				count++
+				list[p] = true
+				return nil
+			}
+			if !mode.IsRegular() {
+				return nil
+			}
+
+			list[p] = true
+			count++
+			return nil
+		})
+
+		count2 := 0
+		err = fs.FastWalk("/", func(path string, mode os.FileMode) error {
+			defer x.Unlock()
+			x.Lock()
+			if !list[path] {
+				return fmt.Errorf("file not found %q", path)
+			}
+			delete(list, path)
+			count2++
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		if count < 10 || count != count2 {
+			t.Errorf("incorrect file count: %d, %d", count, count2)
+		}
+		if len(list) > 0 {
+			i := 0
+			for k := range list {
+				i++
+				if i > 10 {
+					break
+				}
+				t.Errorf("path not removed %q", k)
+			}
+		}
+	})
+}
 
 func TestMemFS(t *testing.T) {
 	fs, err := memfs.NewFS()
@@ -32,7 +186,7 @@ func TestMemFS(t *testing.T) {
 	timestr := time.Now().Format(time.RFC3339)
 	testdir = filepath.Join(testdir, fmt.Sprintf("fstesting%s", timestr))
 
-	t.Logf("Test path: %q", testdir)
+	// t.Logf("Test path: %q", testdir)
 	err = fs.MkdirAll(testdir, 0777)
 	if err != nil {
 		t.Fatal(err)
@@ -58,8 +212,8 @@ func TestMemFS(t *testing.T) {
 
 		for op, report := range testcase.Errors {
 			if Errors[op] == nil {
-				t.Logf("expected: \n%s\n", testcase.Report())
-				t.Logf("  result: \n%s\n", result.Report())
+				// t.Logf("expected: \n%s\n", testcase.Report())
+				// t.Logf("  result: \n%s\n", result.Report())
 				t.Fatalf("%d: On %q got nil but expected to get an err of type (%T)\n", testcase.TestNo, op, testcase.Errors[op].Type())
 				continue
 			}
@@ -68,39 +222,39 @@ func TestMemFS(t *testing.T) {
 					continue
 				}
 
-				t.Logf("expected: \n%s\n", testcase.Report())
-				t.Logf("  result: \n%s\n", result.Report())
-				t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
-				t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
+				// t.Logf("expected: \n%s\n", testcase.Report())
+				// t.Logf("  result: \n%s\n", result.Report())
+				// t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
+				// t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
 				t.Fatalf("%d: On %q expected `err == nil` but got err: (%T) %q\n%s", testcase.TestNo, op, Errors[op].Type(), Errors[op].String(), Errors[op].Stack())
 				maxerrors--
 				continue
 			}
 
 			if Errors[op].Err == nil {
-				t.Logf("expected: \n%s\n", testcase.Report())
-				t.Logf("  result: \n%s\n", result.Report())
-				t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
-				t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
-				t.Fatalf("%d: On %q got `err == nil` but expected err: (%T) %q\n%s", testcase.TestNo, op, testcase.Errors[op].Type(), testcase.Errors[op].String(), Errors[op].Stack())
+				// t.Logf("expected: \n%s\n", testcase.Report())
+				// t.Logf("  result: \n%s\n", result.Report())
+				// t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
+				// t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
+				t.Errorf("%d: On %q got `err == nil` but expected err: (%T) %q\n%s", testcase.TestNo, op, testcase.Errors[op].Type(), testcase.Errors[op].String(), Errors[op].Stack())
 				maxerrors--
 			}
 			if !report.TypesEqual(Errors[op]) {
-				t.Logf("expected: \n%s\n", testcase.Report())
-				t.Logf("  result: \n%s\n", result.Report())
-				t.Logf("%q %q", report.Error(), Errors[op].Error())
-				t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
-				t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
-				t.Fatalf("%d: On %q got different error types, expected (%T) but got (%T)\n", testcase.TestNo, op, report.Type(), Errors[op].Type())
+				// t.Logf("expected: \n%s\n", testcase.Report())
+				// t.Logf("  result: \n%s\n", result.Report())
+				// t.Logf("%q %q", report.Error(), Errors[op].Error())
+				// t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
+				// t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
+				t.Errorf("%d: On %q got different error types, expected (%T) but got (%T)\n", testcase.TestNo, op, report.Type(), Errors[op].Type())
 				maxerrors--
 			}
 			if report.Error() != Errors[op].Error() { //report.Equal(Errors[op]) {
-				t.Logf("expected: \n%s\n", testcase.Report())
-				t.Logf("  result: \n%s\n", result.Report())
+				// t.Logf("expected: \n%s\n", testcase.Report())
+				// t.Logf("  result: \n%s\n", result.Report())
 
-				t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
-				t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
-				t.Fatalf("%d: On %q got different error values,\nexpecte, got:\n%q\n%q\n%s", testcase.TestNo, op, report.Error(), Errors[op].Error(), Errors[op].Stack())
+				// t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
+				// t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
+				t.Errorf("%d: On %q got different error values,\nexpecte, got:\n%q\n%q\n%s", testcase.TestNo, op, report.Error(), Errors[op].Error(), Errors[op].Stack())
 				// t.Fatalf("report.Error() != Errors[op].Error()\n%s\n%s\n", report.Error(), Errors[op].Error())
 				maxerrors--
 			}
