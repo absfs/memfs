@@ -37,6 +37,7 @@ func NewFS() (*FileSystem, error) {
 	fs.cwd = "/"
 	fs.dir = fs.root
 	fs.data = make([][]byte, 2)
+	fs.symlinks = make(map[uint64]string)
 	return fs, nil
 }
 
@@ -81,7 +82,9 @@ func (fs *FileSystem) Chdir(name string) (err error) {
 		return nil
 	}
 	wd := fs.root
+	cwd := name
 	if !filepath.IsAbs(name) {
+		cwd = filepath.Join(fs.cwd, name)
 		wd = fs.dir
 	}
 
@@ -93,7 +96,7 @@ func (fs *FileSystem) Chdir(name string) (err error) {
 		return &os.PathError{Op: "chdir", Path: name, Err: errors.New("not a directory")}
 	}
 
-	fs.cwd = name
+	fs.cwd = cwd
 	fs.dir = node
 	return nil
 }
@@ -111,7 +114,7 @@ func (fs *FileSystem) Open(name string) (absfs.File, error) {
 }
 
 func (fs *FileSystem) Create(name string) (absfs.File, error) {
-	return fs.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0777)
+	return fs.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
 }
 
 func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
@@ -141,9 +144,6 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		return nil, err
 	}
 
-	// if err != nil {
-	// 	exists = false
-	// }
 	access := flag & absfs.O_ACCESS
 	create := flag&os.O_CREATE != 0
 	truncate := flag&os.O_TRUNC != 0
@@ -153,7 +153,6 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.ENOENT}
 	}
 	if exists {
-		// fmt.Printf("node.Ino: %d of %d\n", int(node.Ino), len(fs.data))
 		// err if exclusive create is required
 		if create && flag&os.O_EXCL != 0 {
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EEXIST}
@@ -215,7 +214,9 @@ func (fs *FileSystem) Truncate(name string, size int64) error {
 
 func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	wd := fs.root
-	if !filepath.IsAbs(name) {
+	abs := name
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(fs.cwd, abs)
 		wd = fs.dir
 	}
 	_, err := wd.Resolve(name)
@@ -223,11 +224,14 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 		return &os.PathError{Op: "mkdir", Path: name, Err: os.ErrExist}
 	}
 
-	dir, filename := filepath.Split(name)
+	parent := fs.root
+	dir, filename := filepath.Split(abs)
 	dir = filepath.Clean(dir)
-	parent, err := wd.Resolve(dir)
-	if err != nil {
-		return &os.PathError{Op: "mkdir", Path: dir, Err: err}
+	if dir != "/" {
+		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
+		if err != nil {
+			return &os.PathError{Op: "mkdir", Path: dir, Err: err}
+		}
 	}
 
 	child := fs.ino.NewDir(fs.Umask & perm)
@@ -251,36 +255,58 @@ func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
 }
 
 func (fs *FileSystem) Remove(name string) (err error) {
-	path := inode.Abs(fs.cwd, name)
+	wd := fs.root
+	abs := name
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(fs.cwd, abs)
+		wd = fs.dir
+	}
+	child, err := wd.Resolve(name)
+	if err != nil {
+		return &os.PathError{Op: "remove", Path: name, Err: err}
+	}
+
+	if child.IsDir() {
+		if len(child.Dir) > 0 {
+			return &os.PathError{Op: "remove", Path: name, Err: errors.New("directory not empty")}
+		}
+	}
+
 	parent := fs.root
-	dir := filepath.Dir(path)
+	dir, filename := filepath.Split(abs)
+	dir = filepath.Clean(dir)
 	if dir != "/" {
 		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
 		if err != nil {
 			return &os.PathError{Op: "remove", Path: dir, Err: err}
 		}
 	}
-	return parent.Unlink(filepath.Base(path))
+	return parent.Unlink(filename)
 }
 
 func (fs *FileSystem) RemoveAll(name string) error {
-	path := inode.Abs(fs.cwd, name)
-
-	if path == "/" {
-		fs.root.UnlinkAll()
-		return nil
+	wd := fs.root
+	abs := name
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(fs.cwd, abs)
+		wd = fs.dir
 	}
-	node, err := fs.root.Resolve(strings.TrimLeft(path, "/"))
-
+	child, err := wd.Resolve(name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return &os.PathError{Op: "removeall", Path: path, Err: err}
+		return &os.PathError{Op: "remove", Path: name, Err: err}
 	}
 
-	node.UnlinkAll()
-	return nil
+	parent := fs.root
+	dir, filename := filepath.Split(abs)
+	dir = filepath.Clean(dir)
+	if dir != "/" {
+		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
+		if err != nil {
+			return &os.PathError{Op: "remove", Path: dir, Err: err}
+		}
+	}
+	child.UnlinkAll()
+	return parent.Unlink(filename)
 }
 
 //Chtimes changes the access and modification times of the named file

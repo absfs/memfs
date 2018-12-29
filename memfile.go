@@ -132,6 +132,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	}
 	if n < 1 {
 		n = len(dirs)
+		f.diroffset = 0
 	}
 	infos := make([]os.FileInfo, n-f.diroffset)
 	for i, entry := range dirs[f.diroffset:n] {
