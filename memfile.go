@@ -38,6 +38,9 @@ func (f *File) Read(p []byte) (int, error) {
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
 		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF} //os.ErrPermission
 	}
+	if f.node == nil {
+		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF}
+	}
 	if f.node.IsDir() && len(f.data) == 0 {
 		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EISDIR} //os.ErrPermission
 	}
@@ -107,10 +110,17 @@ func (f *File) Seek(offset int64, whence int) (ret int64, err error) {
 }
 
 func (f *File) Stat() (os.FileInfo, error) {
+	if f.node == nil {
+		return nil, &os.PathError{Op: "stat", Path: f.name, Err: syscall.EBADF}
+	}
 	return &fileinfo{filepath.Base(f.name), f.node}, nil
 }
 
 func (f *File) Sync() error {
+	// Guard against nil node (e.g., after Close() has been called)
+	if f.node == nil {
+		return nil
+	}
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return nil
 	}
@@ -122,6 +132,9 @@ func (f *File) Sync() error {
 func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
 		return nil, os.ErrPermission
+	}
+	if f.node == nil {
+		return nil, &os.PathError{Op: "readdir", Path: f.name, Err: syscall.EBADF}
 	}
 	if !f.node.IsDir() {
 		return nil, errors.New("not a directory")
@@ -146,6 +159,9 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 	var list []string
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
 		return list, os.ErrPermission
+	}
+	if f.node == nil {
+		return list, &os.PathError{Op: "readdirnames", Path: f.name, Err: syscall.EBADF}
 	}
 	if !f.node.IsDir() {
 		return list, errors.New("not a directory")
