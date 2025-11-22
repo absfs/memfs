@@ -187,7 +187,7 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	if !create {
 		if access == os.O_RDONLY && node.Mode&absfs.OS_ALL_R == 0 ||
 			access == os.O_WRONLY && node.Mode&absfs.OS_ALL_W == 0 ||
-			access == os.O_RDWR && node.Mode&(absfs.OS_ALL_W|absfs.OS_ALL_R) == 0 {
+			access == os.O_RDWR && (node.Mode&absfs.OS_ALL_R == 0 || node.Mode&absfs.OS_ALL_W == 0) {
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
 		}
 	}
