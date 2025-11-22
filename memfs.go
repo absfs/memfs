@@ -299,7 +299,7 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	}
 	_, err := wd.Resolve(name)
 	if err == nil {
-		return &os.PathError{Op: "mkdir", Path: name, Err: os.ErrExist}
+		return &os.PathError{Op: "mkdir", Path: name, Err: syscall.EEXIST}
 	}
 
 	parent := fs.root
