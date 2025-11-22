@@ -1,0 +1,11 @@
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Test output files
+test_output.txt
+
+# Go workspace file
+go.work
