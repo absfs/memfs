@@ -11,6 +11,10 @@ import (
 	"github.com/absfs/inode"
 )
 
+// closedFileSentinel is a sentinel value used to detect operations on closed files.
+// Note: This value is currently unused as flags are never set to this value.
+const closedFileSentinel = 3712
+
 // File represents an open file in the in-memory file system.
 //
 // It maintains the file's state including the current read/write offset,
@@ -39,10 +43,8 @@ func (f *File) Name() string {
 // when the end of the file is reached. Returns an error if the file was not
 // opened for reading or if the file handle is invalid.
 func (f *File) Read(p []byte) (int, error) {
-	// if f == nil {
-	// 	panic("nil file handle")
-	// }
-	if f.flags == 3712 {
+	// Check for sentinel value (currently unused but kept for backwards compatibility)
+	if f.flags == closedFileSentinel {
 		return 0, io.EOF
 	}
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
@@ -186,15 +188,18 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		return nil, syscall.ENOTDIR
 	}
 	dirs := f.node.Dir
+	// Check if we've already read all directory entries
 	if f.diroffset >= len(dirs) {
 		return nil, io.EOF
 	}
+	// When n <= 0, read all remaining entries and reset offset for next full read
 	if n < 1 {
 		n = len(dirs)
 		f.diroffset = 0
 	}
 
-	// Calculate the end index and count
+	// Calculate the end index, capping at the total number of entries.
+	// The count represents how many entries we'll actually return.
 	end := f.diroffset + n
 	if end > len(dirs) {
 		end = len(dirs)
@@ -205,6 +210,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	for i, entry := range dirs[f.diroffset:end] {
 		infos[i] = &fileinfo{entry.Name, entry.Inode}
 	}
+	// Update offset for next read to continue from where we left off
 	f.diroffset = end
 	return infos, nil
 }
