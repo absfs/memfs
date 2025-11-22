@@ -245,6 +245,11 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	}
 	data := fs.data[int(node.Ino)]
 
+	// For existing files (not newly created), verify that the file's permission bits
+	// allow the requested access mode. Check that:
+	// - Read-only access requires read permission (OS_ALL_R)
+	// - Write-only access requires write permission (OS_ALL_W)
+	// - Read-write access requires both read and write permissions
 	if !create {
 		if access == os.O_RDONLY && node.Mode&absfs.OS_ALL_R == 0 ||
 			access == os.O_WRONLY && node.Mode&absfs.OS_ALL_W == 0 ||
@@ -468,7 +473,6 @@ func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
 
 	name = inode.Abs(fs.cwd, name)
 
-	// return nil
 	if name != "/" {
 		node, err = fs.root.Resolve(strings.TrimLeft(name, "/"))
 		if err != nil {
@@ -481,11 +485,15 @@ func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
 
 // fileStat resolves symlinks and returns the final inode, with cycle detection
 func (fs *FileSystem) fileStat(cwd, name string) (*inode.Inode, error) {
+	// Initialize the visited map to track inodes we've seen during symlink traversal.
+	// This prevents infinite loops when symlinks form a cycle (e.g., a -> b -> a).
 	visited := make(map[uint64]bool)
 	return fs.fileStatWithVisited(cwd, name, visited)
 }
 
-// fileStatWithVisited is the internal implementation with cycle detection
+// fileStatWithVisited is the internal implementation with cycle detection.
+// It recursively follows symlinks until reaching a non-symlink inode, tracking
+// visited inodes to detect and prevent infinite loops.
 func (fs *FileSystem) fileStatWithVisited(cwd, name string, visited map[uint64]bool) (*inode.Inode, error) {
 	name = inode.Abs(cwd, name)
 	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
@@ -493,19 +501,22 @@ func (fs *FileSystem) fileStatWithVisited(cwd, name string, visited map[uint64]b
 		return nil, &os.PathError{Op: "stat", Path: name, Err: err}
 	}
 
+	// If this is not a symlink, we've found the final target - return it
 	if node.Mode&os.ModeSymlink == 0 {
 		return node, nil
 	}
 
-	// Check for symlink cycle
+	// Detect symlink cycles: if we've already visited this inode during the current
+	// resolution chain, we have a loop (e.g., link1 -> link2 -> link1)
 	if visited[node.Ino] {
 		return nil, &os.PathError{Op: "stat", Path: name, Err: syscall.ELOOP}
 	}
 
-	// Mark this inode as visited
+	// Mark this inode as visited to detect cycles in subsequent recursive calls
 	visited[node.Ino] = true
 
-	// Recursively resolve the symlink
+	// Recursively resolve the symlink target. The target path is stored in fs.symlinks,
+	// and we resolve it relative to the symlink's directory (not the original cwd).
 	return fs.fileStatWithVisited(filepath.Dir(name), fs.symlinks[node.Ino], visited)
 }
 
