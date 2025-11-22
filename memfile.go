@@ -12,6 +12,11 @@ import (
 	"github.com/absfs/inode"
 )
 
+// File represents an open file in the in-memory file system.
+//
+// It maintains the file's state including the current read/write offset,
+// access flags, and a reference to the underlying inode. File implements
+// the absfs.File interface and provides standard file operations.
 type File struct {
 	fs *FileSystem
 
@@ -24,10 +29,16 @@ type File struct {
 	diroffset int
 }
 
+// Name returns the name of the file as provided to Open or Create.
 func (f *File) Name() string {
 	return f.name
 }
 
+// Read reads up to len(p) bytes from the file into p.
+//
+// Returns the number of bytes read and any error encountered. Returns io.EOF
+// when the end of the file is reached. Returns an error if the file was not
+// opened for reading or if the file handle is invalid.
 func (f *File) Read(p []byte) (int, error) {
 	// if f == nil {
 	// 	panic("nil file handle")
@@ -54,6 +65,11 @@ func (f *File) Read(p []byte) (int, error) {
 
 }
 
+// ReadAt reads len(b) bytes from the file starting at byte offset off.
+//
+// Returns the number of bytes read and any error encountered. Unlike Read,
+// ReadAt does not update the file's current offset. Returns an error if the
+// file was not opened for reading.
 func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
 		return 0, os.ErrPermission
@@ -62,6 +78,11 @@ func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
 	return f.Read(b)
 }
 
+// Write writes len(p) bytes from p to the file.
+//
+// Returns the number of bytes written and any error encountered. The file's
+// data is automatically expanded if necessary. Returns an error if the file
+// was not opened for writing.
 func (f *File) Write(p []byte) (int, error) {
 
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
@@ -79,11 +100,19 @@ func (f *File) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// WriteAt writes len(b) bytes to the file starting at byte offset off.
+//
+// Returns the number of bytes written and any error encountered. Unlike Write,
+// WriteAt does not update the file's current offset.
 func (f *File) WriteAt(b []byte, off int64) (n int, err error) {
 	f.offset = off
 	return f.Write(b)
 }
 
+// Close closes the file, making it unusable for I/O.
+//
+// This method syncs any pending writes to the file system and releases
+// the file handle. Subsequent operations on the file will return errors.
 func (f *File) Close() error {
 	err := f.Sync()
 	if err != nil {
@@ -94,6 +123,11 @@ func (f *File) Close() error {
 	return nil
 }
 
+// Seek sets the offset for the next Read or Write on the file.
+//
+// The whence parameter determines the reference point: io.SeekStart (beginning),
+// io.SeekCurrent (current position), or io.SeekEnd (end of file). Returns the
+// new offset from the beginning of the file.
 func (f *File) Seek(offset int64, whence int) (ret int64, err error) {
 	switch whence {
 	case io.SeekStart:
@@ -109,6 +143,9 @@ func (f *File) Seek(offset int64, whence int) (ret int64, err error) {
 	return f.offset, nil
 }
 
+// Stat returns file information about the file.
+//
+// Returns an error if the file handle is invalid.
 func (f *File) Stat() (os.FileInfo, error) {
 	if f.node == nil {
 		return nil, &os.PathError{Op: "stat", Path: f.name, Err: syscall.EBADF}
@@ -116,6 +153,10 @@ func (f *File) Stat() (os.FileInfo, error) {
 	return &fileinfo{filepath.Base(f.name), f.node}, nil
 }
 
+// Sync commits the current contents of the file to the file system.
+//
+// For files opened for writing, this updates the file's data and size
+// in the file system. For read-only files, this is a no-op.
 func (f *File) Sync() error {
 	// Guard against nil node (e.g., after Close() has been called)
 	if f.node == nil {
@@ -129,6 +170,12 @@ func (f *File) Sync() error {
 	return nil
 }
 
+// Readdir reads the contents of the directory associated with the file.
+//
+// Returns up to n FileInfo values. If n <= 0, returns all remaining entries.
+// Subsequent calls continue from where the previous call left off. Returns
+// io.EOF when no more entries remain. Returns an error if the file is not
+// a directory or was not opened for reading.
 func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
 		return nil, os.ErrPermission
@@ -163,6 +210,12 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	return infos, nil
 }
 
+// Readdirnames reads directory entries and returns their names.
+//
+// Returns up to n entry names. If n <= 0, returns all remaining names.
+// Subsequent calls continue from where the previous call left off. Returns
+// io.EOF when no more entries remain. Returns an error if the file is not
+// a directory or was not opened for reading.
 func (f *File) Readdirnames(n int) ([]string, error) {
 	var list []string
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
@@ -198,6 +251,11 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 	return list, nil
 }
 
+// Truncate changes the size of the file.
+//
+// If the file is larger than size, it is truncated. If it is smaller,
+// it is extended with zero bytes. Returns an error if the file was not
+// opened for writing.
 func (f *File) Truncate(size int64) error {
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return os.ErrPermission
@@ -212,35 +270,50 @@ func (f *File) Truncate(size int64) error {
 	return nil
 }
 
+// WriteString writes the contents of string s to the file.
+//
+// Returns the number of bytes written and any error encountered. This is
+// a convenience method equivalent to Write([]byte(s)).
 func (f *File) WriteString(s string) (n int, err error) {
 	return f.Write([]byte(s))
 }
 
+// fileinfo implements os.FileInfo for files in the in-memory file system.
+//
+// It provides file metadata including name, size, modification time,
+// permissions, and file mode. The underlying inode stores the actual
+// metadata.
 type fileinfo struct {
 	name string
 	node *inode.Inode
 }
 
+// Name returns the base name of the file.
 func (i *fileinfo) Name() string {
 	return i.name
 }
 
+// Size returns the length of the file in bytes.
 func (i *fileinfo) Size() int64 {
 	return i.node.Size
 }
 
+// ModTime returns the modification time of the file.
 func (i *fileinfo) ModTime() time.Time {
 	return i.node.Mtime
 }
 
+// Mode returns the file mode and permission bits.
 func (i *fileinfo) Mode() os.FileMode {
 	return i.node.Mode
 }
 
+// Sys returns the underlying inode for the file.
 func (i *fileinfo) Sys() interface{} {
 	return i.node
 }
 
+// IsDir reports whether the file is a directory.
 func (i *fileinfo) IsDir() bool {
 	return i.node.IsDir()
 }

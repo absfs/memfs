@@ -1,3 +1,11 @@
+// Package memfs provides an in-memory file system implementation
+// that conforms to the absfs.FileSystem interface.
+//
+// This package implements a complete virtual file system stored entirely
+// in memory, supporting standard file operations, directories, symbolic
+// links, permissions, and file metadata. It is particularly useful for
+// testing, temporary storage, and scenarios where a full filesystem
+// is needed without disk I/O.
 package memfs
 
 import (
@@ -14,6 +22,13 @@ import (
 	"github.com/absfs/inode"
 )
 
+// FileSystem represents an in-memory file system.
+//
+// It maintains a hierarchical structure of inodes representing files
+// and directories, along with their associated data and metadata.
+// The file system supports standard POSIX-like operations including
+// file creation, deletion, permissions, symbolic links, and directory
+// traversal.
 type FileSystem struct {
 	Umask   os.FileMode
 	Tempdir string
@@ -27,6 +42,11 @@ type FileSystem struct {
 	data     [][]byte
 }
 
+// NewFS creates and initializes a new in-memory file system.
+//
+// The file system is created with a root directory ("/") and default
+// settings including a umask of 0755 and a temp directory at "/tmp".
+// Returns a pointer to the initialized FileSystem and nil error.
 func NewFS() (*FileSystem, error) {
 	fs := new(FileSystem)
 	fs.ino = new(inode.Ino)
@@ -41,14 +61,27 @@ func NewFS() (*FileSystem, error) {
 	return fs, nil
 }
 
+// Separator returns the path separator character for this file system.
+//
+// For memfs, this is always '/' (forward slash) regardless of the
+// underlying operating system.
 func (fs *FileSystem) Separator() uint8 {
 	return '/'
 }
 
+// ListSeparator returns the character used to separate paths in a list.
+//
+// For memfs, this is ':' (colon), consistent with UNIX-like systems.
 func (fs *FileSystem) ListSeparator() uint8 {
 	return ':'
 }
 
+// Rename moves or renames a file or directory from oldpath to newpath.
+//
+// Both relative and absolute paths are supported. Relative paths are
+// resolved relative to the current working directory. The root directory
+// cannot be renamed. Returns an error if oldpath does not exist, newpath
+// already exists, or if the operation violates file system constraints.
 func (fs *FileSystem) Rename(oldpath, newpath string) error {
 	linkErr := &os.LinkError{
 		Op:  "rename",
@@ -75,6 +108,11 @@ func (fs *FileSystem) Rename(oldpath, newpath string) error {
 	return nil
 }
 
+// Chdir changes the current working directory to the named directory.
+//
+// The directory must exist and be accessible. Both absolute and relative
+// paths are supported. Returns an error if the path does not exist or is
+// not a directory.
 func (fs *FileSystem) Chdir(name string) (err error) {
 	if name == "/" {
 		fs.cwd = "/"
@@ -101,22 +139,46 @@ func (fs *FileSystem) Chdir(name string) (err error) {
 	return nil
 }
 
+// Getwd returns the current working directory path.
+//
+// The returned path is always an absolute path. This method never returns
+// an error in the current implementation.
 func (fs *FileSystem) Getwd() (dir string, err error) {
 	return fs.cwd, nil
 }
 
+// TempDir returns the path to the temporary directory.
+//
+// This directory is typically used for temporary file storage. The default
+// value is "/tmp", but can be configured via the Tempdir field.
 func (fs *FileSystem) TempDir() string {
 	return fs.Tempdir
 }
 
+// Open opens the named file for reading.
+//
+// This is equivalent to OpenFile(name, os.O_RDONLY, 0).
+// Returns an error if the file does not exist or cannot be opened.
 func (fs *FileSystem) Open(name string) (absfs.File, error) {
 	return fs.OpenFile(name, os.O_RDONLY, 0)
 }
 
+// Create creates or truncates the named file for writing.
+//
+// This is equivalent to OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644).
+// If the file already exists, it is truncated. Returns an error if the file
+// cannot be created.
 func (fs *FileSystem) Create(name string) (absfs.File, error) {
 	return fs.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
 }
 
+// OpenFile opens the named file with specified flags and permissions.
+//
+// Supported flags include os.O_RDONLY, os.O_WRONLY, os.O_RDWR, os.O_CREATE,
+// os.O_EXCL, and os.O_TRUNC. The perm argument specifies the file permissions
+// to use if a new file is created. Both absolute and relative paths are supported.
+// Returns an error if the operation fails due to permission issues, missing
+// parent directories, or flag conflicts.
 func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
 	if name == "/" {
 		data := fs.data[int(fs.root.Ino)]
@@ -194,6 +256,11 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	return &File{fs: fs, name: name, flags: flag, node: node, data: data}, nil
 }
 
+// Truncate changes the size of the named file.
+//
+// If the file is larger than size, it is truncated. If it is smaller,
+// it is extended with zero bytes. Returns an error if the file does not
+// exist.
 func (fs *FileSystem) Truncate(name string, size int64) error {
 	path := inode.Abs(fs.cwd, name)
 	child, err := fs.root.Resolve(path)
@@ -212,6 +279,11 @@ func (fs *FileSystem) Truncate(name string, size int64) error {
 	return nil
 }
 
+// Mkdir creates a new directory with the specified name and permissions.
+//
+// The parent directory must already exist. Returns an error if the directory
+// already exists, the parent directory does not exist, or if the operation
+// fails.
 func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	wd := fs.root
 	abs := name
@@ -241,6 +313,10 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	return nil
 }
 
+// MkdirAll creates a directory and all necessary parent directories.
+//
+// If the directory already exists, MkdirAll does nothing and returns nil.
+// This is similar to the 'mkdir -p' command in Unix.
 func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
 	name = inode.Abs(fs.cwd, name)
 	path := ""
@@ -276,6 +352,11 @@ func (fs *FileSystem) cleanupData(node *inode.Inode) {
 	}
 }
 
+// Remove deletes the named file or empty directory.
+//
+// Returns an error if the file does not exist, if it is a non-empty
+// directory, or if the operation fails. Use RemoveAll to delete
+// non-empty directories.
 func (fs *FileSystem) Remove(name string) (err error) {
 	wd := fs.root
 	abs := name
@@ -310,6 +391,11 @@ func (fs *FileSystem) Remove(name string) (err error) {
 	return parent.Unlink(filename)
 }
 
+// RemoveAll removes the named file or directory and all its contents.
+//
+// Unlike Remove, RemoveAll will recursively delete directories and their
+// contents. Returns an error if the file does not exist or if the operation
+// fails.
 func (fs *FileSystem) RemoveAll(name string) error {
 	wd := fs.root
 	abs := name
@@ -422,6 +508,11 @@ func (fs *FileSystem) fileStatWithVisited(cwd, name string, visited map[uint64]b
 	return fs.fileStatWithVisited(filepath.Dir(name), fs.symlinks[node.Ino], visited)
 }
 
+// Stat returns file information for the named file, following symbolic links.
+//
+// If the file is a symbolic link, Stat returns information about the file
+// the link points to. Returns an error if the file does not exist or if
+// a symbolic link loop is detected.
 func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 	if name == "/" {
 		return &fileinfo{"/", fs.root}, nil
@@ -430,6 +521,10 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 	return &fileinfo{filepath.Base(name), node}, err
 }
 
+// Lstat returns file information for the named file without following symbolic links.
+//
+// Unlike Stat, if the file is a symbolic link, Lstat returns information
+// about the link itself. Returns an error if the file does not exist.
 func (fs *FileSystem) Lstat(name string) (os.FileInfo, error) {
 	if name == "/" {
 		return &fileinfo{"/", fs.root}, nil
@@ -443,6 +538,10 @@ func (fs *FileSystem) Lstat(name string) (os.FileInfo, error) {
 	return &fileinfo{filepath.Base(name), node}, nil
 }
 
+// Lchown changes the owner and group of the named file without following symbolic links.
+//
+// Unlike Chown, if the file is a symbolic link, Lchown changes the ownership
+// of the link itself rather than the file it points to.
 func (fs *FileSystem) Lchown(name string, uid, gid int) error {
 	if name == "/" {
 		fs.root.Uid = uint32(uid)
@@ -460,6 +559,9 @@ func (fs *FileSystem) Lchown(name string, uid, gid int) error {
 	return nil
 }
 
+// Readlink returns the target of the named symbolic link.
+//
+// Returns an error if the file does not exist or is not a symbolic link.
 func (fs *FileSystem) Readlink(name string) (string, error) {
 	var ino uint64
 	if name == "/" {
@@ -475,6 +577,11 @@ func (fs *FileSystem) Readlink(name string) (string, error) {
 	return fs.symlinks[ino], nil
 }
 
+// Symlink creates a symbolic link at newname pointing to oldname.
+//
+// The oldname file must exist. Returns an error if newname already exists
+// as a non-symbolic link, if oldname does not exist, or if the parent
+// directory of newname does not exist.
 func (fs *FileSystem) Symlink(oldname, newname string) error {
 	wd := fs.root
 	if !filepath.IsAbs(newname) {
@@ -517,6 +624,11 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 	return nil
 }
 
+// Walk traverses the file tree rooted at name, calling fn for each file or directory.
+//
+// The traversal is done depth-first. The function fn is called for each file
+// and directory in the tree, including the root. Returns an error if the walk
+// fails or if fn returns an error.
 func (fs *FileSystem) Walk(name string, fn pathfilepath.WalkFunc) error {
 	var stack []string
 	push := func(path string) {
@@ -566,6 +678,11 @@ func (fs *FileSystem) Walk(name string, fn pathfilepath.WalkFunc) error {
 	return nil
 }
 
+// FastWalk is a faster version of Walk that only provides the file mode.
+//
+// This method traverses the file tree rooted at name, calling fn for each
+// file or directory with only the path and file mode. This is more efficient
+// than Walk when only the file type is needed.
 func (fs *FileSystem) FastWalk(name string, fn absfs.FastWalkFunc) error {
 	return fs.Walk(name, func(path string, info os.FileInfo, err error) error {
 		return fn(path, info.Mode())
