@@ -147,11 +147,19 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		n = len(dirs)
 		f.diroffset = 0
 	}
-	infos := make([]os.FileInfo, n-f.diroffset)
-	for i, entry := range dirs[f.diroffset:n] {
+
+	// Calculate the end index and count
+	end := f.diroffset + n
+	if end > len(dirs) {
+		end = len(dirs)
+	}
+	count := end - f.diroffset
+
+	infos := make([]os.FileInfo, count)
+	for i, entry := range dirs[f.diroffset:end] {
 		infos[i] = &fileinfo{entry.Name, entry.Inode}
 	}
-	f.diroffset += n
+	f.diroffset = end
 	return infos, nil
 }
 
@@ -172,12 +180,21 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 	}
 	if n < 1 {
 		n = len(dirs)
+		f.diroffset = 0
 	}
-	list = make([]string, n-f.diroffset)
-	for i, entry := range dirs[f.diroffset:n] {
+
+	// Calculate the number of remaining entries and the end index
+	end := f.diroffset + n
+	if end > len(dirs) {
+		end = len(dirs)
+	}
+	count := end - f.diroffset
+
+	list = make([]string, count)
+	for i, entry := range dirs[f.diroffset:end] {
 		list[i] = entry.Name
 	}
-	f.diroffset += n
+	f.diroffset = end
 	return list, nil
 }
 
