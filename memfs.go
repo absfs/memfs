@@ -254,6 +254,28 @@ func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
 	return nil
 }
 
+// cleanupData recursively cleans up fs.data entries for a node and all its children
+func (fs *FileSystem) cleanupData(node *inode.Inode) {
+	if node == nil {
+		return
+	}
+
+	// If it's a directory, recursively clean up children first
+	if node.IsDir() {
+		for _, entry := range node.Dir {
+			if entry.Name != ".." && entry.Name != "." {
+				fs.cleanupData(entry.Inode)
+			}
+		}
+	}
+
+	// Clean up the data for this node
+	ino := int(node.Ino)
+	if ino < len(fs.data) {
+		fs.data[ino] = nil
+	}
+}
+
 func (fs *FileSystem) Remove(name string) (err error) {
 	wd := fs.root
 	abs := name
@@ -281,6 +303,10 @@ func (fs *FileSystem) Remove(name string) (err error) {
 			return &os.PathError{Op: "remove", Path: dir, Err: err}
 		}
 	}
+
+	// Clean up data before unlinking
+	fs.cleanupData(child)
+
 	return parent.Unlink(filename)
 }
 
@@ -305,6 +331,10 @@ func (fs *FileSystem) RemoveAll(name string) error {
 			return &os.PathError{Op: "remove", Path: dir, Err: err}
 		}
 	}
+
+	// Clean up data before unlinking
+	fs.cleanupData(child)
+
 	child.UnlinkAll()
 	return parent.Unlink(filename)
 }
