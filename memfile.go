@@ -1,7 +1,6 @@
 package memfs
 
 import (
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -184,7 +183,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		return nil, &os.PathError{Op: "readdir", Path: f.name, Err: syscall.EBADF}
 	}
 	if !f.node.IsDir() {
-		return nil, errors.New("not a directory")
+		return nil, syscall.ENOTDIR
 	}
 	dirs := f.node.Dir
 	if f.diroffset >= len(dirs) {
@@ -225,7 +224,7 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 		return list, &os.PathError{Op: "readdirnames", Path: f.name, Err: syscall.EBADF}
 	}
 	if !f.node.IsDir() {
-		return list, errors.New("not a directory")
+		return list, syscall.ENOTDIR
 	}
 	dirs := f.node.Dir
 	if f.diroffset >= len(dirs) {

@@ -9,7 +9,6 @@
 package memfs
 
 import (
-	"errors"
 	"os"
 	filepath "path" // force forward slash separators on all OSs.
 	pathfilepath "path/filepath"
@@ -89,7 +88,7 @@ func (fs *FileSystem) Rename(oldpath, newpath string) error {
 		New: newpath,
 	}
 	if oldpath == "/" {
-		linkErr.Err = errors.New("the root folder may not be moved or renamed")
+		linkErr.Err = syscall.EINVAL
 		return linkErr
 	}
 
@@ -131,7 +130,7 @@ func (fs *FileSystem) Chdir(name string) (err error) {
 		return &os.PathError{Op: "chdir", Path: name, Err: err}
 	}
 	if !node.IsDir() {
-		return &os.PathError{Op: "chdir", Path: name, Err: errors.New("not a directory")}
+		return &os.PathError{Op: "chdir", Path: name, Err: syscall.ENOTDIR}
 	}
 
 	fs.cwd = cwd
@@ -373,7 +372,7 @@ func (fs *FileSystem) Remove(name string) (err error) {
 
 	if child.IsDir() {
 		if len(child.Dir) > 0 {
-			return &os.PathError{Op: "remove", Path: name, Err: errors.New("directory not empty")}
+			return &os.PathError{Op: "remove", Path: name, Err: syscall.ENOTEMPTY}
 		}
 	}
 
