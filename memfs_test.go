@@ -378,3 +378,201 @@ func TestOpenWrite(t *testing.T) {
 	}
 
 }
+
+func TestSymlinkCycleDetection(t *testing.T) {
+	// Test 1: Self-referencing symlink (A -> A)
+	t.Run("SelfReferencingSymlink", func(t *testing.T) {
+		fs, err := memfs.NewFS()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Create a temporary target file
+		f, err := fs.Create("/temp_target")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+
+		// Create symlink pointing to temp target
+		err = fs.Symlink("/temp_target", "/self_link")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Update symlink to point to itself (this uses the update path in Symlink)
+		err = fs.Symlink("/self_link", "/self_link")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Attempting to stat should detect the cycle
+		_, err = fs.Stat("/self_link")
+		if err == nil {
+			t.Fatal("expected error for self-referencing symlink, got nil")
+		}
+		// Check that the error is ELOOP (too many levels of symbolic links)
+		pathErr, ok := err.(*os.PathError)
+		if !ok {
+			t.Fatalf("expected *os.PathError, got %T", err)
+		}
+		if pathErr.Err.Error() != "too many levels of symbolic links" {
+			t.Errorf("expected ELOOP error, got: %v", pathErr.Err)
+		}
+	})
+
+	// Test 2: Two-node circular symlink (A -> B -> A)
+	t.Run("TwoNodeCircularSymlink", func(t *testing.T) {
+		fs, err := memfs.NewFS()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Create temporary target files
+		f1, err := fs.Create("/temp1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f1.Close()
+
+		f2, err := fs.Create("/temp2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f2.Close()
+
+		// Create two symlinks initially pointing to temp files
+		err = fs.Symlink("/temp1", "/link_a")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = fs.Symlink("/temp2", "/link_b")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Update to create cycle: A -> B
+		err = fs.Symlink("/link_b", "/link_a")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// B -> A (completing the cycle)
+		err = fs.Symlink("/link_a", "/link_b")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Attempting to stat either should detect the cycle
+		_, err = fs.Stat("/link_a")
+		if err == nil {
+			t.Fatal("expected error for circular symlink A, got nil")
+		}
+
+		_, err = fs.Stat("/link_b")
+		if err == nil {
+			t.Fatal("expected error for circular symlink B, got nil")
+		}
+	})
+
+	// Test 3: Three-node circular symlink (A -> B -> C -> A)
+	t.Run("ThreeNodeCircularSymlink", func(t *testing.T) {
+		fs, err := memfs.NewFS()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Create temporary target files
+		temps := []string{"/t1", "/t2", "/t3"}
+		for _, name := range temps {
+			f, err := fs.Create(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+		}
+
+		// Create three symlinks initially pointing to temp files
+		err = fs.Symlink("/t1", "/chain_a")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = fs.Symlink("/t2", "/chain_b")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = fs.Symlink("/t3", "/chain_c")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Update to create cycle: A -> B -> C -> A
+		err = fs.Symlink("/chain_b", "/chain_a")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = fs.Symlink("/chain_c", "/chain_b")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = fs.Symlink("/chain_a", "/chain_c")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Attempting to stat any of them should detect the cycle
+		_, err = fs.Stat("/chain_a")
+		if err == nil {
+			t.Fatal("expected error for circular symlink chain, got nil")
+		}
+	})
+
+	// Test 4: Valid symlink chain (no cycle)
+	t.Run("ValidSymlinkChain", func(t *testing.T) {
+		fs, err := memfs.NewFS()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Create a file
+		f, err := fs.Create("/real_file.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.Write([]byte("test content"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+
+		// Create symlink chain: link1 -> link2 -> real_file
+		err = fs.Symlink("/real_file.txt", "/link2")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = fs.Symlink("/link2", "/link1")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// This should work fine (no cycle)
+		info, err := fs.Stat("/link1")
+		if err != nil {
+			t.Fatalf("expected no error for valid symlink chain, got: %v", err)
+		}
+
+		if info.Name() != "link1" {
+			t.Errorf("expected name 'link1', got '%s'", info.Name())
+		}
+
+		if info.Size() != 12 {
+			t.Errorf("expected size 12, got %d", info.Size())
+		}
+	})
+}
