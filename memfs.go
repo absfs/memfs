@@ -271,11 +271,13 @@ func (fs *FileSystem) Truncate(name string, size int64) error {
 	i := int(child.Ino)
 	if size <= child.Size {
 		fs.data[i] = fs.data[i][:int(size)]
+		child.Size = size
 		return nil
 	}
 	data := make([]byte, int(size))
 	copy(data, fs.data[i])
 	fs.data[i] = data
+	child.Size = size
 	return nil
 }
 
@@ -620,6 +622,7 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 	if err != nil {
 		return &os.PathError{Op: "symlink", Path: newname, Err: err}
 	}
+	fs.data = append(fs.data, []byte{})
 	fs.symlinks[newNode.Ino] = oldname
 	return nil
 }
