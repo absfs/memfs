@@ -362,8 +362,14 @@ func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
 	return nil
 }
 
-// TODO: Avoid cyclical links
+// fileStat resolves symlinks and returns the final inode, with cycle detection
 func (fs *FileSystem) fileStat(cwd, name string) (*inode.Inode, error) {
+	visited := make(map[uint64]bool)
+	return fs.fileStatWithVisited(cwd, name, visited)
+}
+
+// fileStatWithVisited is the internal implementation with cycle detection
+func (fs *FileSystem) fileStatWithVisited(cwd, name string, visited map[uint64]bool) (*inode.Inode, error) {
 	name = inode.Abs(cwd, name)
 	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
 	if err != nil {
@@ -373,7 +379,17 @@ func (fs *FileSystem) fileStat(cwd, name string) (*inode.Inode, error) {
 	if node.Mode&os.ModeSymlink == 0 {
 		return node, nil
 	}
-	return fs.fileStat(filepath.Dir(name), fs.symlinks[node.Ino])
+
+	// Check for symlink cycle
+	if visited[node.Ino] {
+		return nil, &os.PathError{Op: "stat", Path: name, Err: syscall.ELOOP}
+	}
+
+	// Mark this inode as visited
+	visited[node.Ino] = true
+
+	// Recursively resolve the symlink
+	return fs.fileStatWithVisited(filepath.Dir(name), fs.symlinks[node.Ino], visited)
 }
 
 func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
