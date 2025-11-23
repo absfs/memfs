@@ -349,7 +349,9 @@ func TestErrorReportingMatchesOS(t *testing.T) {
 				return err
 			},
 			wantErrType: "*os.PathError",
-			wantSyscall: syscall.EBADF,
+			// wantSyscall is nil because both return custom "use of closed file" error
+			// The string comparison below will verify they match
+			wantSyscall: nil,
 		},
 		{
 			name: "Readdir on non-directory",

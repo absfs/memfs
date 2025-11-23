@@ -1,6 +1,7 @@
 package memfs
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 // closedFileSentinel is a sentinel value used to detect operations on closed files.
 // Note: This value is currently unused as flags are never set to this value.
 const closedFileSentinel = 3712
+
+// errClosed is returned by Readdir and Readdirnames when called on a closed file.
+// This matches the error message returned by the os package for these operations.
+var errClosed = errors.New("use of closed file")
 
 // File represents an open file in the in-memory file system.
 //
@@ -182,7 +187,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 		return nil, os.ErrPermission
 	}
 	if f.node == nil {
-		return nil, &os.PathError{Op: "readdir", Path: f.name, Err: syscall.EBADF}
+		return nil, &os.PathError{Op: "readdir", Path: f.name, Err: errClosed}
 	}
 	if !f.node.IsDir() {
 		return nil, syscall.ENOTDIR
@@ -227,7 +232,7 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 		return list, os.ErrPermission
 	}
 	if f.node == nil {
-		return list, &os.PathError{Op: "readdirnames", Path: f.name, Err: syscall.EBADF}
+		return list, &os.PathError{Op: "readdirnames", Path: f.name, Err: errClosed}
 	}
 	if !f.node.IsDir() {
 		return list, syscall.ENOTDIR
