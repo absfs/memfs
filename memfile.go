@@ -171,7 +171,9 @@ func (f *File) Sync() error {
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return nil
 	}
+	f.fs.mu.Lock()
 	f.fs.data[int(f.node.Ino)] = f.data
+	f.fs.mu.Unlock()
 	f.node.Size = int64(len(f.data))
 	return nil
 }

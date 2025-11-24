@@ -1,11 +1,12 @@
 module github.com/absfs/memfs
 
-go 1.20
+go 1.25.4
 
 require (
-	github.com/absfs/absfs v0.0.0-20200602175035-e49edc9fef15
+	github.com/absfs/absfs v0.0.0-20251109181304-77e2f9ac4448
 	github.com/absfs/fstesting v0.0.0-20180810212821-8b575cdeb80d
-	github.com/absfs/inode v0.0.0-20190804195220-b7cd14cdd0dc
+	github.com/absfs/inode v0.0.2-0.20251124215006-bac3fa8943ab
+	github.com/absfs/lockfs v0.0.0-20251124210544-241704814c03
 	github.com/absfs/osfs v0.0.0-20220705103527-80b6215cf130
 )
 

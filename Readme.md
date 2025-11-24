@@ -48,15 +48,72 @@ func main() {
 }
 ```
 
+## Thread Safety
+
+**`memfs` is NOT thread-safe by design.** This is an intentional choice to maximize performance for single-threaded use cases.
+
+### Performance: Raw vs Concurrent
+
+| Operation | Raw memfs | With lockfs | Overhead |
+|-----------|-----------|-------------|----------|
+| Create+Write+Close+Remove | 379 ns | 439 ns | +16% |
+| Open+Read+Close | 59 ns | 97 ns | +64% |
+| Stat | 41 ns | 46 ns | +12% |
+| Mkdir+Remove | 73 ns | 88 ns | +20% |
+
+### When to Use Raw memfs (Single-Threaded)
+
+Use `memfs` directly without locking when:
+- **Unit tests** running sequentially
+- **Single-goroutine applications** where only one goroutine accesses the filesystem
+- **Performance-critical code** where every nanosecond matters
+- **Isolated filesystem instances** where each goroutine has its own `memfs.FileSystem`
+
+```go
+// Fast single-threaded usage
+fs, _ := memfs.NewFS()
+f, _ := fs.Create("/file.txt")
+f.Write([]byte("data"))
+f.Close()
+```
+
+### When to Use lockfs (Multi-Threaded)
+
+Wrap with [`lockfs`](https://github.com/absfs/lockfs) when multiple goroutines need concurrent access to the same filesystem instance:
+
+```go
+import "github.com/absfs/lockfs"
+
+// Thread-safe concurrent usage
+raw, _ := memfs.NewFS()
+fs, _ := lockfs.NewFS(raw)
+
+// Now safe for concurrent access
+go func() { fs.Create("/file1.txt") }()
+go func() { fs.Create("/file2.txt") }()
+```
+
+While lockfs adds 7-64% overhead per operation, **concurrent workloads may achieve higher total throughput** by utilizing multiple CPU cores. The trade-off:
+- **Single-threaded**: Raw memfs is faster per operation
+- **Multi-threaded**: lockfs enables parallelism that can outweigh the per-operation overhead
+
+### Alternative: Separate Instances
+
+For embarrassingly parallel workloads, consider giving each goroutine its own filesystem instance:
+
+```go
+// No locking needed - each goroutine has isolated state
+go func() {
+    fs, _ := memfs.NewFS()
+    // ... work with fs
+}()
+go func() {
+    fs, _ := memfs.NewFS()
+    // ... work with fs
+}()
+```
+
 ## Limitations
-
-### Thread Safety
-**WARNING**: `memfs` is **NOT thread-safe**. The implementation does not use mutexes or any synchronization primitives. Concurrent access to the same FileSystem instance from multiple goroutines will result in race conditions and undefined behavior.
-
-If you need concurrent access:
-- Create separate FileSystem instances for each goroutine
-- Implement your own synchronization using mutexes around fs operations
-- Use channels to serialize access to a shared FileSystem instance
 
 ### Persistence
 `memfs` provides **no persistence**. All data is stored in memory and will be lost when:
@@ -116,56 +173,6 @@ These numbers are approximate and will vary based on hardware and system load.
 - Close files promptly to trigger Sync and update metadata
 - Use `RemoveAll` for recursive deletion rather than manual traversal
 
-## Thread Safety Warnings
-
-**CRITICAL**: Do not access the same `memfs.FileSystem` instance from multiple goroutines without external synchronization.
-
-### Race Condition Examples
-
-```go
-// UNSAFE - Data race on fs.data
-fs, _ := memfs.NewFS()
-go func() {
-    f, _ := fs.Create("/file1.txt")
-    f.Write([]byte("data"))
-    f.Close()
-}()
-go func() {
-    f, _ := fs.Create("/file2.txt")
-    f.Write([]byte("data"))
-    f.Close()
-}()
-```
-
-### Safe Concurrent Usage
-
-```go
-// Option 1: Use separate filesystem instances
-fs1, _ := memfs.NewFS()
-fs2, _ := memfs.NewFS()
-go func() { fs1.Create("/file1.txt") }()
-go func() { fs2.Create("/file2.txt") }()
-
-// Option 2: External synchronization
-var mu sync.Mutex
-fs, _ := memfs.NewFS()
-go func() {
-    mu.Lock()
-    defer mu.Unlock()
-    fs.Create("/file1.txt")
-}()
-```
-
-### What's Safe
-- Reading from different open file handles to different files
-- Multiple goroutines reading (not writing) metadata with `Stat`/`Lstat`
-
-### What's Unsafe
-- Concurrent writes to `fs.data` (file creation, writing, deletion)
-- Concurrent directory modifications (Mkdir, Remove)
-- Concurrent access to the same file handle
-- Any operation that modifies the filesystem structure
-
 ## Comparison with Alternatives
 
 ### vs os package
@@ -221,9 +228,9 @@ go func() {
 - Use `Readlink()` to check where a symlink points
 
 #### Race conditions and crashes
-- See [Thread Safety Warnings](#thread-safety-warnings) above
+- See [Thread Safety](#thread-safety) above
 - Run tests with `-race` flag: `go test -race`
-- Ensure only one goroutine accesses the FileSystem at a time
+- Wrap with `lockfs` for concurrent access, or ensure only one goroutine accesses the FileSystem at a time
 
 #### Path separator issues
 - memfs always uses `/` as the path separator, regardless of OS

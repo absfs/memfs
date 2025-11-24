@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/absfs/inode"
+	"github.com/absfs/lockfs"
 )
 
 // TestReadAt tests the ReadAt function
@@ -892,9 +893,14 @@ func TestRemoveAllEdgeCases(t *testing.T) {
 	}
 }
 
-// TestConcurrentFileAccess tests concurrent access to files
+// TestConcurrentFileAccess tests concurrent access to files using lockfs.
+// memfs is not thread-safe by design; use lockfs for concurrent access.
 func TestConcurrentFileAccess(t *testing.T) {
-	fs, err := NewFS()
+	raw, err := NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := lockfs.NewFS(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,9 +959,14 @@ func TestConcurrentFileAccess(t *testing.T) {
 	}
 }
 
-// TestConcurrentDirectoryOps tests concurrent directory operations
+// TestConcurrentDirectoryOps tests concurrent directory operations using lockfs.
+// memfs is not thread-safe by design; use lockfs for concurrent access.
 func TestConcurrentDirectoryOps(t *testing.T) {
-	fs, err := NewFS()
+	raw, err := NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := lockfs.NewFS(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

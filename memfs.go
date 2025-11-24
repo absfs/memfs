@@ -14,6 +14,7 @@ import (
 	pathfilepath "path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,6 +29,11 @@ import (
 // The file system supports standard POSIX-like operations including
 // file creation, deletion, permissions, symbolic links, and directory
 // traversal.
+//
+// Thread Safety: FileSystem is NOT safe for concurrent use by multiple
+// goroutines without external synchronization. For concurrent access,
+// wrap with lockfs.NewFS() which provides proper serialization of all
+// filesystem operations.
 type FileSystem struct {
 	Umask   os.FileMode
 	Tempdir string
@@ -37,6 +43,7 @@ type FileSystem struct {
 	dir  *inode.Inode
 	ino  *inode.Ino
 
+	mu       sync.RWMutex // protects data and symlinks
 	symlinks map[uint64]string
 	data     [][]byte
 }
@@ -180,11 +187,15 @@ func (fs *FileSystem) Create(name string) (absfs.File, error) {
 // parent directories, or flag conflicts.
 func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
 	if name == "/" {
+		fs.mu.RLock()
 		data := fs.data[int(fs.root.Ino)]
+		fs.mu.RUnlock()
 		return &File{fs: fs, name: name, flags: flag, node: fs.root, data: data}, nil
 	}
 	if name == "." {
+		fs.mu.RLock()
 		data := fs.data[int(fs.dir.Ino)]
+		fs.mu.RUnlock()
 		return &File{fs: fs, name: name, flags: flag, node: fs.dir, data: data}, nil
 	}
 
@@ -226,7 +237,9 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 
 		// if we must truncate the file
 		if truncate {
+			fs.mu.Lock()
 			fs.data[int(node.Ino)] = fs.data[int(node.Ino)][:0]
+			fs.mu.Unlock()
 		}
 
 	} else { // !exists
@@ -241,9 +254,13 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		if err != nil {
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: err}
 		}
+		fs.mu.Lock()
 		fs.data = append(fs.data, []byte{})
+		fs.mu.Unlock()
 	}
+	fs.mu.RLock()
 	data := fs.data[int(node.Ino)]
+	fs.mu.RUnlock()
 
 	// For existing files (not newly created), verify that the file's permission bits
 	// allow the requested access mode. Check that:
@@ -273,6 +290,8 @@ func (fs *FileSystem) Truncate(name string, size int64) error {
 	}
 
 	i := int(child.Ino)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	if size <= child.Size {
 		fs.data[i] = fs.data[i][:int(size)]
 		child.Size = size
@@ -315,7 +334,9 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	child := fs.ino.NewDir(fs.Umask & perm)
 	parent.Link(filename, child)
 	child.Link("..", parent)
+	fs.mu.Lock()
 	fs.data = append(fs.data, []byte{})
+	fs.mu.Unlock()
 	return nil
 }
 
@@ -336,7 +357,8 @@ func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
 	return nil
 }
 
-// cleanupData recursively cleans up fs.data entries for a node and all its children
+// cleanupData recursively cleans up fs.data entries for a node and all its children.
+// Caller must hold fs.mu.Lock().
 func (fs *FileSystem) cleanupData(node *inode.Inode) {
 	if node == nil {
 		return
@@ -392,7 +414,9 @@ func (fs *FileSystem) Remove(name string) (err error) {
 	}
 
 	// Clean up data before unlinking
+	fs.mu.Lock()
 	fs.cleanupData(child)
+	fs.mu.Unlock()
 
 	return parent.Unlink(filename)
 }
@@ -425,7 +449,9 @@ func (fs *FileSystem) RemoveAll(name string) error {
 	}
 
 	// Clean up data before unlinking
+	fs.mu.Lock()
 	fs.cleanupData(child)
+	fs.mu.Unlock()
 
 	child.UnlinkAll()
 	return parent.Unlink(filename)
@@ -517,7 +543,10 @@ func (fs *FileSystem) fileStatWithVisited(cwd, name string, visited map[uint64]b
 
 	// Recursively resolve the symlink target. The target path is stored in fs.symlinks,
 	// and we resolve it relative to the symlink's directory (not the original cwd).
-	return fs.fileStatWithVisited(filepath.Dir(name), fs.symlinks[node.Ino], visited)
+	fs.mu.RLock()
+	target := fs.symlinks[node.Ino]
+	fs.mu.RUnlock()
+	return fs.fileStatWithVisited(filepath.Dir(name), target, visited)
 }
 
 // Stat returns file information for the named file, following symbolic links.
@@ -586,7 +615,10 @@ func (fs *FileSystem) Readlink(name string) (string, error) {
 		ino = node.Ino
 	}
 
-	return fs.symlinks[ino], nil
+	fs.mu.RLock()
+	target := fs.symlinks[ino]
+	fs.mu.RUnlock()
+	return target, nil
 }
 
 // Symlink creates a symbolic link at newname pointing to oldname.
@@ -615,7 +647,9 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 
 	if exists {
 		newNode.Mode = oldNode.Mode | os.ModeSymlink
+		fs.mu.Lock()
 		fs.symlinks[newNode.Ino] = oldname
+		fs.mu.Unlock()
 		return nil
 	}
 
@@ -632,8 +666,10 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 	if err != nil {
 		return &os.PathError{Op: "symlink", Path: newname, Err: err}
 	}
+	fs.mu.Lock()
 	fs.data = append(fs.data, []byte{})
 	fs.symlinks[newNode.Ino] = oldname
+	fs.mu.Unlock()
 	return nil
 }
 
