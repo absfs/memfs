@@ -48,6 +48,25 @@ type FileSystem struct {
 	data     [][]byte
 }
 
+// ensureDataCapacity ensures fs.data has capacity for the given inode number
+// and initializes the entry with an empty byte slice.
+// Caller must hold fs.mu.Lock().
+func (fs *FileSystem) ensureDataCapacity(ino uint64) {
+	idx := int(ino)
+	if idx < len(fs.data) {
+		// Entry already exists, ensure it's initialized
+		if fs.data[idx] == nil {
+			fs.data[idx] = []byte{}
+		}
+		return
+	}
+	// Grow slice to accommodate the inode number
+	newData := make([][]byte, idx+1)
+	copy(newData, fs.data)
+	newData[idx] = []byte{} // Initialize the new entry
+	fs.data = newData
+}
+
 // NewFS creates and initializes a new in-memory file system.
 //
 // The file system is created with a root directory ("/") and default
@@ -255,7 +274,7 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: err}
 		}
 		fs.mu.Lock()
-		fs.data = append(fs.data, []byte{})
+		fs.ensureDataCapacity(node.Ino)
 		fs.mu.Unlock()
 	}
 	fs.mu.RLock()
@@ -335,7 +354,7 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	parent.Link(filename, child)
 	child.Link("..", parent)
 	fs.mu.Lock()
-	fs.data = append(fs.data, []byte{})
+	fs.ensureDataCapacity(child.Ino)
 	fs.mu.Unlock()
 	return nil
 }
@@ -667,7 +686,7 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 		return &os.PathError{Op: "symlink", Path: newname, Err: err}
 	}
 	fs.mu.Lock()
-	fs.data = append(fs.data, []byte{})
+	fs.ensureDataCapacity(newNode.Ino)
 	fs.symlinks[newNode.Ino] = oldname
 	fs.mu.Unlock()
 	return nil
