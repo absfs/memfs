@@ -1,4 +1,10 @@
 # memfs - In Memory File System
+
+[![CI](https://github.com/absfs/memfs/actions/workflows/ci.yml/badge.svg)](https://github.com/absfs/memfs/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/absfs/memfs)](https://goreportcard.com/report/github.com/absfs/memfs)
+[![codecov](https://codecov.io/gh/absfs/memfs/branch/master/graph/badge.svg)](https://codecov.io/gh/absfs/memfs)
+[![GoDoc](https://godoc.org/github.com/absfs/memfs?status.svg)](https://godoc.org/github.com/absfs/memfs)
+
 The `memfs` package implements the `absfs.FileSystem` interface as a RAM-backed filesystem.
 
 Care has been taken to ensure that `memfs` returns identical errors both in text
