@@ -194,15 +194,28 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	if !f.node.IsDir() {
 		return nil, syscall.ENOTDIR
 	}
-	dirs := f.node.Dir
-	// Check if we've already read all directory entries
+
+	// Filter out "." and ".." entries to match os package behavior
+	var dirs []*inode.DirEntry
+	for _, entry := range f.node.Dir {
+		if entry.Name != "." && entry.Name != ".." {
+			dirs = append(dirs, entry)
+		}
+	}
+
+	// When n <= 0, read all entries and reset offset for next full read
+	if n < 1 {
+		infos := make([]os.FileInfo, len(dirs))
+		for i, entry := range dirs {
+			infos[i] = &fileinfo{entry.Name, entry.Inode}
+		}
+		f.diroffset = len(dirs)
+		return infos, nil
+	}
+
+	// Check if we've already read all directory entries (only for n > 0)
 	if f.diroffset >= len(dirs) {
 		return nil, io.EOF
-	}
-	// When n <= 0, read all remaining entries and reset offset for next full read
-	if n < 1 {
-		n = len(dirs)
-		f.diroffset = 0
 	}
 
 	// Calculate the end index, capping at the total number of entries.
@@ -239,13 +252,27 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 	if !f.node.IsDir() {
 		return list, syscall.ENOTDIR
 	}
-	dirs := f.node.Dir
+
+	// Filter out "." and ".." entries to match os package behavior
+	var dirs []*inode.DirEntry
+	for _, entry := range f.node.Dir {
+		if entry.Name != "." && entry.Name != ".." {
+			dirs = append(dirs, entry)
+		}
+	}
+
+	// When n <= 0, read all entries and reset offset for next full read
+	if n < 1 {
+		list = make([]string, len(dirs))
+		for i, entry := range dirs {
+			list[i] = entry.Name
+		}
+		f.diroffset = len(dirs)
+		return list, nil
+	}
+
 	if f.diroffset >= len(dirs) {
 		return list, io.EOF
-	}
-	if n < 1 {
-		n = len(dirs)
-		f.diroffset = 0
 	}
 
 	// Calculate the number of remaining entries and the end index
