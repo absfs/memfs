@@ -9,3 +9,8 @@ test_output.txt
 
 # Go workspace file
 go.work
+
+# Claude Code artifacts
+.claude/
+CLAUDE.md
+.project_meta/
