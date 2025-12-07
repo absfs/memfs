@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/absfs/absfs"
-	"github.com/absfs/fstesting"
 	"github.com/absfs/memfs"
 	"github.com/absfs/osfs/fastwalk"
 )
@@ -58,13 +57,17 @@ func TestWalk(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer fout.Close()
 		fin, err := os.Open(path)
 		if err != nil {
+			fout.Close()
 			return err
 		}
-		defer fin.Close()
-		io.Copy(fout, fin)
+		_, copyErr := io.Copy(fout, fin)
+		fin.Close()
+		fout.Close()
+		if copyErr != nil {
+			return copyErr
+		}
 		return nil
 	})
 	if err != nil {
@@ -198,7 +201,6 @@ func TestMemFS(t *testing.T) {
 	timestr := time.Now().Format(time.RFC3339)
 	testdir = filepath.Join(testdir, fmt.Sprintf("fstesting%s", timestr))
 
-	// t.Logf("Test path: %q", testdir)
 	err = fs.MkdirAll(testdir, 0777)
 	if err != nil {
 		t.Fatal(err)
@@ -214,74 +216,8 @@ func TestMemFS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	maxerrors := 10
-	fstesting.AutoTest(0, func(testcase *fstesting.Testcase) error {
-		result, err := fstesting.FsTest(fs, filepath.Dir(testcase.Path), testcase)
-		if err != nil {
-			t.Fatal(err)
-		}
-		Errors := result.Errors
-
-		for op, report := range testcase.Errors {
-			if Errors[op] == nil {
-				// t.Logf("expected: \n%s\n", testcase.Report())
-				// t.Logf("  result: \n%s\n", result.Report())
-				t.Fatalf("%d: On %q got nil but expected to get an err of type (%T)\n", testcase.TestNo, op, testcase.Errors[op].Type())
-				continue
-			}
-			if report.Err == nil {
-				if Errors[op].Err == nil {
-					continue
-				}
-
-				// t.Logf("expected: \n%s\n", testcase.Report())
-				// t.Logf("  result: \n%s\n", result.Report())
-				// t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
-				// t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
-				t.Fatalf("%d: On %q expected `err == nil` but got err: (%T) %q\n%s", testcase.TestNo, op, Errors[op].Type(), Errors[op].String(), Errors[op].Stack())
-				maxerrors--
-				continue
-			}
-
-			if Errors[op].Err == nil {
-				// t.Logf("expected: \n%s\n", testcase.Report())
-				// t.Logf("  result: \n%s\n", result.Report())
-				// t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
-				// t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
-				t.Errorf("%d: On %q got `err == nil` but expected err: (%T) %q\n%s", testcase.TestNo, op, testcase.Errors[op].Type(), testcase.Errors[op].String(), Errors[op].Stack())
-				maxerrors--
-			}
-			if !report.TypesEqual(Errors[op]) {
-				// t.Logf("expected: \n%s\n", testcase.Report())
-				// t.Logf("  result: \n%s\n", result.Report())
-				// t.Logf("%q %q", report.Error(), Errors[op].Error())
-				// t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
-				// t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
-				t.Errorf("%d: On %q got different error types, expected (%T) but got (%T)\n", testcase.TestNo, op, report.Type(), Errors[op].Type())
-				maxerrors--
-			}
-			if report.Error() != Errors[op].Error() { //report.Equal(Errors[op]) {
-				// t.Logf("expected: \n%s\n", testcase.Report())
-				// t.Logf("  result: \n%s\n", result.Report())
-
-				// t.Logf("  flags: (%d)%s, (%d)%s", result.Flags, absfs.Flags(result.Flags), testcase.Flags, absfs.Flags(testcase.Flags))
-				// t.Logf("  perm: %s, %s", result.Mode, testcase.Mode)
-				t.Errorf("%d: On %q got different error values,\nexpecte, got:\n%q\n%q\n%s", testcase.TestNo, op, report.Error(), Errors[op].Error(), Errors[op].Stack())
-				// t.Fatalf("report.Error() != Errors[op].Error()\n%s\n%s\n", report.Error(), Errors[op].Error())
-				maxerrors--
-			}
-
-			if maxerrors < 1 {
-				t.Fatal("too many errors")
-			}
-			fmt.Printf("  %10d Tests\r", testcase.TestNo)
-		}
-		return nil
-	})
-	if err != nil && err.Error() != "stop" {
-		t.Fatal(err)
-	}
-
+	// Old fstesting.AutoTest API has been removed.
+	// Use TestMemFSSuite for comprehensive testing with new fstesting.Suite API.
 }
 
 func TestMkdir(t *testing.T) {
