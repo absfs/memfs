@@ -4,7 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
+	"path"
 	"syscall"
 	"time"
 
@@ -156,7 +156,7 @@ func (f *File) Stat() (os.FileInfo, error) {
 	if f.node == nil {
 		return nil, &os.PathError{Op: "stat", Path: f.name, Err: syscall.EBADF}
 	}
-	return &fileinfo{filepath.Base(f.name), f.node}, nil
+	return &fileinfo{path.Base(f.name), f.node}, nil
 }
 
 // Sync commits the current contents of the file to the file system.

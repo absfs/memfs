@@ -10,8 +10,8 @@ package memfs
 
 import (
 	"os"
-	filepath "path" // force forward slash separators on all OSs.
-	pathfilepath "path/filepath"
+	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -118,12 +118,12 @@ func (fs *FileSystem) Rename(oldpath, newpath string) error {
 		return linkErr
 	}
 
-	if !filepath.IsAbs(oldpath) {
-		oldpath = filepath.Join(fs.cwd, oldpath)
+	if !path.IsAbs(oldpath) {
+		oldpath = path.Join(fs.cwd, oldpath)
 	}
 
-	if !filepath.IsAbs(newpath) {
-		newpath = filepath.Join(fs.cwd, newpath)
+	if !path.IsAbs(newpath) {
+		newpath = path.Join(fs.cwd, newpath)
 	}
 	err := fs.root.Rename(oldpath, newpath)
 	if err != nil {
@@ -146,8 +146,8 @@ func (fs *FileSystem) Chdir(name string) (err error) {
 	}
 	wd := fs.root
 	cwd := name
-	if !filepath.IsAbs(name) {
-		cwd = filepath.Join(fs.cwd, name)
+	if !path.IsAbs(name) {
+		cwd = path.Join(fs.cwd, name)
 		wd = fs.dir
 	}
 
@@ -219,7 +219,7 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	}
 
 	wd := fs.root
-	if !filepath.IsAbs(name) {
+	if !path.IsAbs(name) {
 		wd = fs.dir
 	}
 	var exists bool
@@ -228,8 +228,8 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		exists = true
 	}
 
-	dir, filename := filepath.Split(name)
-	dir = filepath.Clean(dir)
+	dir, filename := path.Split(name)
+	dir = path.Clean(dir)
 	parent, err := wd.Resolve(dir)
 	if err != nil {
 		return nil, err
@@ -331,8 +331,8 @@ func (fs *FileSystem) Truncate(name string, size int64) error {
 func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	wd := fs.root
 	abs := name
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(fs.cwd, abs)
+	if !path.IsAbs(abs) {
+		abs = path.Join(fs.cwd, abs)
 		wd = fs.dir
 	}
 	_, err := wd.Resolve(name)
@@ -341,8 +341,8 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	}
 
 	parent := fs.root
-	dir, filename := filepath.Split(abs)
-	dir = filepath.Clean(dir)
+	dir, filename := path.Split(abs)
+	dir = path.Clean(dir)
 	if dir != "/" {
 		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
 		if err != nil {
@@ -365,13 +365,13 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 // This is similar to the 'mkdir -p' command in Unix.
 func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
 	name = inode.Abs(fs.cwd, name)
-	path := ""
+	dirPath := ""
 	for _, p := range strings.Split(name, string(fs.Separator())) {
 		if p == "" {
 			p = "/"
 		}
-		path = filepath.Join(path, p)
-		fs.Mkdir(path, perm)
+		dirPath = path.Join(dirPath, p)
+		fs.Mkdir(dirPath, perm)
 	}
 	return nil
 }
@@ -407,8 +407,8 @@ func (fs *FileSystem) cleanupData(node *inode.Inode) {
 func (fs *FileSystem) Remove(name string) (err error) {
 	wd := fs.root
 	abs := name
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(fs.cwd, abs)
+	if !path.IsAbs(abs) {
+		abs = path.Join(fs.cwd, abs)
 		wd = fs.dir
 	}
 	child, err := wd.Resolve(name)
@@ -423,8 +423,8 @@ func (fs *FileSystem) Remove(name string) (err error) {
 	}
 
 	parent := fs.root
-	dir, filename := filepath.Split(abs)
-	dir = filepath.Clean(dir)
+	dir, filename := path.Split(abs)
+	dir = path.Clean(dir)
 	if dir != "/" {
 		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
 		if err != nil {
@@ -448,8 +448,8 @@ func (fs *FileSystem) Remove(name string) (err error) {
 func (fs *FileSystem) RemoveAll(name string) error {
 	wd := fs.root
 	abs := name
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(fs.cwd, abs)
+	if !path.IsAbs(abs) {
+		abs = path.Join(fs.cwd, abs)
 		wd = fs.dir
 	}
 	child, err := wd.Resolve(name)
@@ -458,8 +458,8 @@ func (fs *FileSystem) RemoveAll(name string) error {
 	}
 
 	parent := fs.root
-	dir, filename := filepath.Split(abs)
-	dir = filepath.Clean(dir)
+	dir, filename := path.Split(abs)
+	dir = path.Clean(dir)
 	if dir != "/" {
 		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
 		if err != nil {
@@ -565,7 +565,7 @@ func (fs *FileSystem) fileStatWithVisited(cwd, name string, visited map[uint64]b
 	fs.mu.RLock()
 	target := fs.symlinks[node.Ino]
 	fs.mu.RUnlock()
-	return fs.fileStatWithVisited(filepath.Dir(name), target, visited)
+	return fs.fileStatWithVisited(path.Dir(name), target, visited)
 }
 
 // Stat returns file information for the named file, following symbolic links.
@@ -578,7 +578,7 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 		return &fileinfo{"/", fs.root}, nil
 	}
 	node, err := fs.fileStat(fs.cwd, name)
-	return &fileinfo{filepath.Base(name), node}, err
+	return &fileinfo{path.Base(name), node}, err
 }
 
 // Lstat returns file information for the named file without following symbolic links.
@@ -595,7 +595,7 @@ func (fs *FileSystem) Lstat(name string) (os.FileInfo, error) {
 		return nil, &os.PathError{Op: "remove", Path: name, Err: err}
 	}
 
-	return &fileinfo{filepath.Base(name), node}, nil
+	return &fileinfo{path.Base(name), node}, nil
 }
 
 // Lchown changes the owner and group of the named file without following symbolic links.
@@ -647,7 +647,7 @@ func (fs *FileSystem) Readlink(name string) (string, error) {
 // directory of newname does not exist.
 func (fs *FileSystem) Symlink(oldname, newname string) error {
 	wd := fs.root
-	if !filepath.IsAbs(newname) {
+	if !path.IsAbs(newname) {
 		wd = fs.dir
 	}
 	var exists bool
@@ -672,8 +672,8 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 		return nil
 	}
 
-	dir, filename := filepath.Split(newname)
-	dir = filepath.Clean(dir)
+	dir, filename := path.Split(newname)
+	dir = path.Clean(dir)
 	parent, err := wd.Resolve(dir)
 	if err != nil {
 		return err
@@ -697,27 +697,27 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 // The traversal is done depth-first. The function fn is called for each file
 // and directory in the tree, including the root. Returns an error if the walk
 // fails or if fn returns an error.
-func (fs *FileSystem) Walk(name string, fn pathfilepath.WalkFunc) error {
+func (fs *FileSystem) Walk(name string, fn filepath.WalkFunc) error {
 	var stack []string
-	push := func(path string) {
-		stack = append(stack, path)
+	push := func(p string) {
+		stack = append(stack, p)
 	}
 	pop := func() string {
-		path := stack[len(stack)-1]
+		p := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		return path
+		return p
 	}
 
 	push(name)
 	for len(stack) > 0 {
-		path := pop()
-		info, err := fs.Stat(path)
+		currentPath := pop()
+		info, err := fs.Stat(currentPath)
 		if err != nil {
 			return err
 		}
 
 		if info.IsDir() {
-			f, err := fs.Open(path)
+			f, err := fs.Open(currentPath)
 			if err != nil {
 				return err
 			}
@@ -733,11 +733,11 @@ func (fs *FileSystem) Walk(name string, fn pathfilepath.WalkFunc) error {
 				if p == ".." || p == "." {
 					continue
 				}
-				push(filepath.Join(path, p))
+				push(path.Join(currentPath, p))
 			}
 		}
 
-		err = fn(path, info, nil)
+		err = fn(currentPath, info, nil)
 		if err != nil {
 			return err
 		}
