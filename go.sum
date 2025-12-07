@@ -1,6 +1,9 @@
 github.com/absfs/absfs v0.0.0-20200602175035-e49edc9fef15/go.mod h1:EcuvbVuyyWyu+g4ACjKzyUypG60qSvorqC/hjByBEqY=
 github.com/absfs/absfs v0.0.0-20251109181304-77e2f9ac4448 h1:uN3Q47kmtV6TIGHZbrCbCf68jWmYDWyTcqq5JuoyON4=
 github.com/absfs/absfs v0.0.0-20251109181304-77e2f9ac4448/go.mod h1:IvFD36FQcMxLLZNhs2Lms+Uosc0G3AJ2JHOJIz8E5d8=
+github.com/absfs/fstesting v0.0.0-20180810212821-8b575cdeb80d/go.mod h1:Ib9xUBFJeggV+KCP6/90/ymnt4Siu6V1vBFJrrT1y/s=
+github.com/absfs/fstesting v0.0.0-20251206231118-7a50ca2cce8a h1:XDf6hhmXiLj7WjXm0+6P5EM7TYV19cxFye0CJncyhzw=
+github.com/absfs/fstesting v0.0.0-20251206231118-7a50ca2cce8a/go.mod h1:k+GNl+VG/teXQBkCH5vt+gzPtkDCQTjX+hTgpDnnqEs=
 github.com/absfs/inode v0.0.2-0.20251124215006-bac3fa8943ab h1:6QoppJnYs2lh5FRADAo2GeR2SjyaVzCf6Q+BjqiZFpU=
 github.com/absfs/inode v0.0.2-0.20251124215006-bac3fa8943ab/go.mod h1:98Uz4QOknMBXXWwXUIs2TzSwuz+9mbSAKASbwF1eld8=
 github.com/absfs/lockfs v0.0.0-20251124210544-241704814c03 h1:CnVf8nV/DHhbspnqdiF/KYcenfIDT4zcNhJY7w3PdUE=
