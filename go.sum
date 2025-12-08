@@ -2,6 +2,8 @@ github.com/absfs/absfs v0.0.0-20251109181304-77e2f9ac4448 h1:uN3Q47kmtV6TIGHZbrC
 github.com/absfs/absfs v0.0.0-20251109181304-77e2f9ac4448/go.mod h1:IvFD36FQcMxLLZNhs2Lms+Uosc0G3AJ2JHOJIz8E5d8=
 github.com/absfs/fstesting v0.0.0-20251207001735-c9d62652ff82 h1:mcVMad1EpGeEUdOWws9Ui/2iV1z9FQhA6K2OuSPEWMI=
 github.com/absfs/fstesting v0.0.0-20251207001735-c9d62652ff82/go.mod h1:k+GNl+VG/teXQBkCH5vt+gzPtkDCQTjX+hTgpDnnqEs=
+github.com/absfs/inode v0.0.0-20251208170702-9db24ab95ae4 h1:on/poHeOcUsAivcRifj/YVn3KW42mcvGuwIcwY0laTA=
+github.com/absfs/inode v0.0.0-20251208170702-9db24ab95ae4/go.mod h1:98Uz4QOknMBXXWwXUIs2TzSwuz+9mbSAKASbwF1eld8=
 github.com/absfs/lockfs v0.0.0-20251124210544-241704814c03 h1:CnVf8nV/DHhbspnqdiF/KYcenfIDT4zcNhJY7w3PdUE=
 github.com/absfs/lockfs v0.0.0-20251124210544-241704814c03/go.mod h1:HVN3eRlj4K900z7171bfd7cUM2iyUM8q0YetQDgfbOY=
 github.com/absfs/osfs v0.1.0-fastwalk h1:dEHAusiK/K8ROQgohL25q+cyqbiMXzSt1pgR3nbhNEg=
