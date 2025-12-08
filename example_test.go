@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"path"
 	"testing"
 
 	"github.com/absfs/memfs"
@@ -308,7 +308,7 @@ func Example_temporaryFiles() {
 	fs.MkdirAll(tmpDir, 0755)
 
 	// Create a temp file
-	tmpFile := filepath.Join(tmpDir, "temp-12345.txt")
+	tmpFile := path.Join(tmpDir, "temp-12345.txt")
 	file, _ := fs.Create(tmpFile)
 	file.Write([]byte("temporary data"))
 	file.Close()
@@ -400,12 +400,7 @@ func Example_chownAndChtimes() {
 	// Change ownership
 	fs.Chown("/test.txt", 1000, 1000)
 
-	// Change access and modification times
-	atime := filepath.Join("2024-01-01 10:00:00")
-	mtime := filepath.Join("2024-01-01 12:00:00")
-	_ = atime
-	_ = mtime
-	// Note: In a real scenario, you'd parse these into time.Time values
+	// Note: Could also change access/modification times with fs.Chtimes()
 
 	info, _ := fs.Stat("/test.txt")
 	fmt.Printf("File: %s, Size: %d bytes\n", info.Name(), info.Size())

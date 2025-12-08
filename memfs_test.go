@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -159,7 +159,7 @@ func TestMemFS(t *testing.T) {
 
 	testdir := fs.TempDir()
 	timestr := time.Now().Format(time.RFC3339)
-	testdir = filepath.Join(testdir, fmt.Sprintf("fstesting%s", timestr))
+	testdir = path.Join(testdir, fmt.Sprintf("fstesting%s", timestr))
 
 	err = fs.MkdirAll(testdir, 0777)
 	if err != nil {
@@ -205,13 +205,13 @@ func TestMkdir(t *testing.T) {
 	}
 
 	var list []string
-	path := "/"
+	currentPath := "/"
 outer:
 	for _, name := range strings.Split(testdir, "/")[1:] {
 		if name == "" {
 			continue
 		}
-		f, err := fs.Open(path)
+		f, err := fs.Open(currentPath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -222,11 +222,11 @@ outer:
 		}
 		for _, n := range list {
 			if n == name {
-				path = filepath.Join(path, name)
+				currentPath = path.Join(currentPath, name)
 				continue outer
 			}
 		}
-		t.Errorf("path error: %q + %q:  %s", path, name, list)
+		t.Errorf("path error: %q + %q:  %s", currentPath, name, list)
 	}
 
 }
