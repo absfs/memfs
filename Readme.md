@@ -240,7 +240,7 @@ These numbers are approximate and will vary based on hardware and system load.
 
 #### Path separator issues
 - memfs always uses `/` as the path separator, regardless of OS
-- Use `filepath.Join()` or construct paths with `/` directly
+- Use `path.Join()` (not `filepath.Join()`) or construct paths with `/` directly
 - Avoid using `\` (backslash) in paths
 
 ### Debugging Tips
