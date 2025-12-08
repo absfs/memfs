@@ -31,7 +31,7 @@ import (
 // traversal.
 //
 // Thread Safety: FileSystem uses a thread-safe ByteStore for file data
-// and a mutex for symlinks, making it safe for concurrent use by multiple
+// and a sync.Map for symlinks, making it safe for concurrent use by multiple
 // goroutines. The ByteStore handles all file data operations with its own
 // internal synchronization.
 type FileSystem struct {
@@ -44,8 +44,7 @@ type FileSystem struct {
 	ino  *inode.Ino
 
 	store    *MemByteStore
-	mu       sync.RWMutex // protects symlinks only
-	symlinks map[uint64]string
+	symlinks sync.Map // uint64 -> string
 }
 
 // NewFS creates and initializes a new in-memory file system.
@@ -63,7 +62,7 @@ func NewFS() (*FileSystem, error) {
 	fs.cwd = "/"
 	fs.dir = fs.root
 	fs.store = NewMemByteStore()
-	fs.symlinks = make(map[uint64]string)
+	// fs.symlinks is sync.Map - zero value is ready to use
 	return fs, nil
 }
 
@@ -514,9 +513,11 @@ func (fs *FileSystem) fileStatWithVisited(cwd, name string, visited map[uint64]b
 
 	// Recursively resolve the symlink target. The target path is stored in fs.symlinks,
 	// and we resolve it relative to the symlink's directory (not the original cwd).
-	fs.mu.RLock()
-	target := fs.symlinks[node.Ino]
-	fs.mu.RUnlock()
+	targetVal, ok := fs.symlinks.Load(node.Ino)
+	if !ok {
+		return nil, &os.PathError{Op: "stat", Path: name, Err: syscall.EINVAL}
+	}
+	target := targetVal.(string)
 	return fs.fileStatWithVisited(path.Dir(name), target, visited)
 }
 
@@ -586,10 +587,11 @@ func (fs *FileSystem) Readlink(name string) (string, error) {
 		ino = node.Ino
 	}
 
-	fs.mu.RLock()
-	target := fs.symlinks[ino]
-	fs.mu.RUnlock()
-	return target, nil
+	targetVal, ok := fs.symlinks.Load(ino)
+	if !ok {
+		return "", nil
+	}
+	return targetVal.(string), nil
 }
 
 // Symlink creates a symbolic link at newname pointing to oldname.
@@ -618,9 +620,7 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 
 	if exists {
 		newNode.Mode = oldNode.Mode | os.ModeSymlink
-		fs.mu.Lock()
-		fs.symlinks[newNode.Ino] = oldname
-		fs.mu.Unlock()
+		fs.symlinks.Store(newNode.Ino, oldname)
 		return nil
 	}
 
@@ -637,9 +637,7 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 	if err != nil {
 		return &os.PathError{Op: "symlink", Path: newname, Err: err}
 	}
-	fs.mu.Lock()
-	fs.symlinks[newNode.Ino] = oldname
-	fs.mu.Unlock()
+	fs.symlinks.Store(newNode.Ino, oldname)
 	return nil
 }
 
