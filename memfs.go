@@ -30,10 +30,10 @@ import (
 // file creation, deletion, permissions, symbolic links, and directory
 // traversal.
 //
-// Thread Safety: FileSystem is NOT safe for concurrent use by multiple
-// goroutines without external synchronization. For concurrent access,
-// wrap with lockfs.NewFS() which provides proper serialization of all
-// filesystem operations.
+// Thread Safety: FileSystem uses a thread-safe ByteStore for file data
+// and a mutex for symlinks, making it safe for concurrent use by multiple
+// goroutines. The ByteStore handles all file data operations with its own
+// internal synchronization.
 type FileSystem struct {
 	Umask   os.FileMode
 	Tempdir string
@@ -43,28 +43,9 @@ type FileSystem struct {
 	dir  *inode.Inode
 	ino  *inode.Ino
 
-	mu       sync.RWMutex // protects data and symlinks
+	store    *MemByteStore
+	mu       sync.RWMutex // protects symlinks only
 	symlinks map[uint64]string
-	data     [][]byte
-}
-
-// ensureDataCapacity ensures fs.data has capacity for the given inode number
-// and initializes the entry with an empty byte slice.
-// Caller must hold fs.mu.Lock().
-func (fs *FileSystem) ensureDataCapacity(ino uint64) {
-	idx := int(ino)
-	if idx < len(fs.data) {
-		// Entry already exists, ensure it's initialized
-		if fs.data[idx] == nil {
-			fs.data[idx] = []byte{}
-		}
-		return
-	}
-	// Grow slice to accommodate the inode number
-	newData := make([][]byte, idx+1)
-	copy(newData, fs.data)
-	newData[idx] = []byte{} // Initialize the new entry
-	fs.data = newData
 }
 
 // NewFS creates and initializes a new in-memory file system.
@@ -81,7 +62,7 @@ func NewFS() (*FileSystem, error) {
 	fs.root = fs.ino.NewDir(fs.Umask)
 	fs.cwd = "/"
 	fs.dir = fs.root
-	fs.data = make([][]byte, 2)
+	fs.store = NewMemByteStore()
 	fs.symlinks = make(map[uint64]string)
 	return fs, nil
 }
@@ -206,16 +187,10 @@ func (fs *FileSystem) Create(name string) (absfs.File, error) {
 // parent directories, or flag conflicts.
 func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
 	if name == "/" {
-		fs.mu.RLock()
-		data := fs.data[int(fs.root.Ino)]
-		fs.mu.RUnlock()
-		return &File{fs: fs, name: name, flags: flag, node: fs.root, data: data}, nil
+		return &File{fs: fs, name: name, flags: flag, node: fs.root}, nil
 	}
 	if name == "." {
-		fs.mu.RLock()
-		data := fs.data[int(fs.dir.Ino)]
-		fs.mu.RUnlock()
-		return &File{fs: fs, name: name, flags: flag, node: fs.dir, data: data}, nil
+		return &File{fs: fs, name: name, flags: flag, node: fs.dir}, nil
 	}
 
 	wd := fs.root
@@ -256,9 +231,8 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 
 		// if we must truncate the file
 		if truncate {
-			fs.mu.Lock()
-			fs.data[int(node.Ino)] = fs.data[int(node.Ino)][:0]
-			fs.mu.Unlock()
+			fs.store.Truncate(node.Ino, 0)
+			node.Size = 0
 		}
 
 	} else { // !exists
@@ -273,13 +247,8 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		if err != nil {
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: err}
 		}
-		fs.mu.Lock()
-		fs.ensureDataCapacity(node.Ino)
-		fs.mu.Unlock()
+		// No need to initialize store - it handles non-existent files gracefully
 	}
-	fs.mu.RLock()
-	data := fs.data[int(node.Ino)]
-	fs.mu.RUnlock()
 
 	// For existing files (not newly created), verify that the file's permission bits
 	// allow the requested access mode. Check that:
@@ -293,7 +262,7 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
 		}
 	}
-	return &File{fs: fs, name: name, flags: flag, node: node, data: data}, nil
+	return &File{fs: fs, name: name, flags: flag, node: node}, nil
 }
 
 // Truncate changes the size of the named file.
@@ -308,17 +277,10 @@ func (fs *FileSystem) Truncate(name string, size int64) error {
 		return err
 	}
 
-	i := int(child.Ino)
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if size <= child.Size {
-		fs.data[i] = fs.data[i][:int(size)]
-		child.Size = size
-		return nil
+	err = fs.store.Truncate(child.Ino, size)
+	if err != nil {
+		return err
 	}
-	data := make([]byte, int(size))
-	copy(data, fs.data[i])
-	fs.data[i] = data
 	child.Size = size
 	return nil
 }
@@ -353,9 +315,7 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	child := fs.ino.NewDir(fs.Umask & perm)
 	parent.Link(filename, child)
 	child.Link("..", parent)
-	fs.mu.Lock()
-	fs.ensureDataCapacity(child.Ino)
-	fs.mu.Unlock()
+	// No need to initialize store - it handles non-existent files gracefully
 	return nil
 }
 
@@ -376,8 +336,7 @@ func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
 	return nil
 }
 
-// cleanupData recursively cleans up fs.data entries for a node and all its children.
-// Caller must hold fs.mu.Lock().
+// cleanupData recursively cleans up store entries for a node and all its children.
 func (fs *FileSystem) cleanupData(node *inode.Inode) {
 	if node == nil {
 		return
@@ -393,10 +352,7 @@ func (fs *FileSystem) cleanupData(node *inode.Inode) {
 	}
 
 	// Clean up the data for this node
-	ino := int(node.Ino)
-	if ino < len(fs.data) {
-		fs.data[ino] = nil
-	}
+	fs.store.Remove(node.Ino)
 }
 
 // Remove deletes the named file or empty directory.
@@ -433,9 +389,7 @@ func (fs *FileSystem) Remove(name string) (err error) {
 	}
 
 	// Clean up data before unlinking
-	fs.mu.Lock()
 	fs.cleanupData(child)
-	fs.mu.Unlock()
 
 	return parent.Unlink(filename)
 }
@@ -468,9 +422,7 @@ func (fs *FileSystem) RemoveAll(name string) error {
 	}
 
 	// Clean up data before unlinking
-	fs.mu.Lock()
 	fs.cleanupData(child)
-	fs.mu.Unlock()
 
 	child.UnlinkAll()
 	return parent.Unlink(filename)
@@ -686,7 +638,6 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 		return &os.PathError{Op: "symlink", Path: newname, Err: err}
 	}
 	fs.mu.Lock()
-	fs.ensureDataCapacity(newNode.Ino)
 	fs.symlinks[newNode.Ino] = oldname
 	fs.mu.Unlock()
 	return nil

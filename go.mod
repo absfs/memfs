@@ -7,5 +7,6 @@ require (
 	github.com/absfs/fstesting v0.0.0-20251207001735-c9d62652ff82
 	github.com/absfs/inode v0.0.2-0.20251124215006-bac3fa8943ab
 	github.com/absfs/lockfs v0.0.0-20251124210544-241704814c03
-	github.com/absfs/osfs v0.1.0-fastwalk
 )
+
+replace github.com/absfs/inode => ../inode

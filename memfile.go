@@ -25,13 +25,15 @@ var errClosed = errors.New("use of closed file")
 // It maintains the file's state including the current read/write offset,
 // access flags, and a reference to the underlying inode. File implements
 // the absfs.File interface and provides standard file operations.
+//
+// File operations use the FileSystem's ByteStore for all data access,
+// which provides thread-safe read and write operations.
 type File struct {
 	fs *FileSystem
 
 	name  string
 	flags int
 	node  *inode.Inode
-	data  []byte
 
 	offset    int64
 	diroffset int
@@ -53,22 +55,28 @@ func (f *File) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
-		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF} //os.ErrPermission
+		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF}
 	}
 	if f.node == nil {
 		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF}
 	}
-	if f.node.IsDir() && len(f.data) == 0 {
-		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EISDIR} //os.ErrPermission
-	}
-	if f.offset >= int64(len(f.data)) {
-		return 0, io.EOF
+	if f.node.IsDir() {
+		// Check if directory is empty
+		size, _ := f.fs.store.Stat(f.node.Ino)
+		if size == 0 {
+			return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EISDIR}
+		}
 	}
 
-	n := copy(p, f.data[f.offset:])
+	n, err := f.fs.store.ReadAt(f.node.Ino, p, f.offset)
 	f.offset += int64(n)
-	return n, nil
 
+	// If we got io.EOF but read some data, suppress EOF for this call.
+	// Next read will return (0, io.EOF). This matches standard Read() behavior.
+	if err == io.EOF && n > 0 {
+		return n, nil
+	}
+	return n, err
 }
 
 // ReadAt reads len(b) bytes from the file starting at byte offset off.
@@ -80,8 +88,10 @@ func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
 	if f.flags&absfs.O_ACCESS == os.O_WRONLY {
 		return 0, os.ErrPermission
 	}
-	f.offset = off
-	return f.Read(b)
+	if f.node == nil {
+		return 0, &os.PathError{Op: "read", Path: f.name, Err: syscall.EBADF}
+	}
+	return f.fs.store.ReadAt(f.node.Ino, b, off)
 }
 
 // Write writes len(p) bytes from p to the file.
@@ -90,19 +100,25 @@ func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
 // data is automatically expanded if necessary. Returns an error if the file
 // was not opened for writing.
 func (f *File) Write(p []byte) (int, error) {
-
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
 	}
-	data := f.data
-	size := len(p) + int(f.offset)
-	if size > len(data) {
-		data = make([]byte, size)
-		copy(data, f.data)
+	if f.node == nil {
+		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
 	}
-	n := copy(data[int(f.offset):], p)
+
+	n, err := f.fs.store.WriteAt(f.node.Ino, p, f.offset)
+	if err != nil {
+		return n, err
+	}
 	f.offset += int64(n)
-	f.data = data
+
+	// Update inode size if we wrote beyond the current size
+	newSize := f.offset
+	if newSize > f.node.Size {
+		f.node.Size = newSize
+	}
+
 	return n, nil
 }
 
@@ -111,20 +127,32 @@ func (f *File) Write(p []byte) (int, error) {
 // Returns the number of bytes written and any error encountered. Unlike Write,
 // WriteAt does not update the file's current offset.
 func (f *File) WriteAt(b []byte, off int64) (n int, err error) {
-	f.offset = off
-	return f.Write(b)
+	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
+		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
+	}
+	if f.node == nil {
+		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
+	}
+
+	n, err = f.fs.store.WriteAt(f.node.Ino, b, off)
+	if err != nil {
+		return n, err
+	}
+
+	// Update inode size if we wrote beyond the current size
+	newSize := off + int64(n)
+	if newSize > f.node.Size {
+		f.node.Size = newSize
+	}
+
+	return n, nil
 }
 
 // Close closes the file, making it unusable for I/O.
 //
-// This method syncs any pending writes to the file system and releases
-// the file handle. Subsequent operations on the file will return errors.
+// This releases the file handle. Subsequent operations on the file will return errors.
+// Note: Since we use ByteStore directly, there's no buffering to sync.
 func (f *File) Close() error {
-	err := f.Sync()
-	if err != nil {
-		return err
-	}
-
 	f.node = nil
 	return nil
 }
@@ -141,7 +169,11 @@ func (f *File) Seek(offset int64, whence int) (ret int64, err error) {
 	case io.SeekCurrent:
 		f.offset += offset
 	case io.SeekEnd:
-		f.offset = int64(len(f.data)) + offset
+		size, err := f.fs.store.Stat(f.node.Ino)
+		if err != nil {
+			return 0, err
+		}
+		f.offset = size + offset
 	}
 	if f.offset < 0 {
 		f.offset = 0
@@ -161,20 +193,9 @@ func (f *File) Stat() (os.FileInfo, error) {
 
 // Sync commits the current contents of the file to the file system.
 //
-// For files opened for writing, this updates the file's data and size
-// in the file system. For read-only files, this is a no-op.
+// Since we use ByteStore directly without buffering, this is a no-op.
+// All writes are immediately visible.
 func (f *File) Sync() error {
-	// Guard against nil node (e.g., after Close() has been called)
-	if f.node == nil {
-		return nil
-	}
-	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
-		return nil
-	}
-	f.fs.mu.Lock()
-	f.fs.data[int(f.node.Ino)] = f.data
-	f.fs.mu.Unlock()
-	f.node.Size = int64(len(f.data))
 	return nil
 }
 
@@ -299,13 +320,15 @@ func (f *File) Truncate(size int64) error {
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return os.ErrPermission
 	}
-	if int(size) <= len(f.data) {
-		f.data = f.data[:int(size)]
-		return nil
+	if f.node == nil {
+		return &os.PathError{Op: "truncate", Path: f.name, Err: syscall.EBADF}
 	}
-	data := make([]byte, int(size))
-	copy(data, f.data)
-	f.data = data
+
+	err := f.fs.store.Truncate(f.node.Ino, size)
+	if err != nil {
+		return err
+	}
+	f.node.Size = size
 	return nil
 }
 
