@@ -372,7 +372,9 @@ func (fs *FileSystem) Remove(name string) (err error) {
 	}
 
 	if child.IsDir() {
-		if len(child.Dir) > 0 {
+		// Directories always contain "." and ".." entries internally,
+		// so an empty directory has exactly 2 entries
+		if len(child.Dir) > 2 {
 			return &os.PathError{Op: "remove", Path: name, Err: syscall.ENOTEMPTY}
 		}
 	}

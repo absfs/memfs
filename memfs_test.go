@@ -472,3 +472,75 @@ func TestSymlinkCycleDetection(t *testing.T) {
 		}
 	})
 }
+
+// TestRemoveEmptyDirectory verifies that Remove works on empty directories.
+// This tests that the internal "." and ".." entries don't prevent removal.
+func TestRemoveEmptyDirectory(t *testing.T) {
+	fs, err := memfs.NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an empty directory
+	err = fs.Mkdir("/emptydir", 0755)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify Readdir returns 0 entries (matching os behavior - no . or ..)
+	f, err := fs.Open("/emptydir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := f.Readdir(-1)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("Expected 0 entries in empty directory, got %d", len(entries))
+	}
+
+	// Remove should succeed on empty directory
+	err = fs.Remove("/emptydir")
+	if err != nil {
+		t.Errorf("Remove on empty directory failed: %v", err)
+	}
+
+	// Verify directory is gone
+	_, err = fs.Stat("/emptydir")
+	if !os.IsNotExist(err) {
+		t.Errorf("Directory should not exist after Remove, got err: %v", err)
+	}
+}
+
+// TestRemoveNonEmptyDirectory verifies that Remove fails on non-empty directories.
+func TestRemoveNonEmptyDirectory(t *testing.T) {
+	fs, err := memfs.NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a directory with a file
+	err = fs.Mkdir("/nonempty", 0755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := fs.Create("/nonempty/file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Remove should fail
+	err = fs.Remove("/nonempty")
+	if err == nil {
+		t.Error("Remove on non-empty directory should fail")
+	}
+
+	// Directory should still exist
+	_, err = fs.Stat("/nonempty")
+	if err != nil {
+		t.Errorf("Directory should still exist: %v", err)
+	}
+}
