@@ -215,16 +215,16 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 
 	// error if it does not exist, and we are not allowed to create it.
 	if !exists && !create {
-		return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.ENOENT}
+		return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: syscall.ENOENT}
 	}
 	if exists {
 		// err if exclusive create is required
 		if create && flag&os.O_EXCL != 0 {
-			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EEXIST}
+			return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: syscall.EEXIST}
 		}
 		if node.IsDir() {
 			if access != os.O_RDONLY || truncate {
-				return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.EISDIR} // os.ErrNotExist}
+				return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: syscall.EISDIR} // os.ErrNotExist}
 			}
 		}
 
@@ -237,14 +237,14 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	} else { // !exists
 		// error if we cannot create the file
 		if !create {
-			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: syscall.ENOENT} //os.ErrNotExist}
+			return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: syscall.ENOENT} //os.ErrNotExist}
 		}
 
 		// Create write-able file
 		node = fs.ino.New(fs.Umask & perm)
 		err := parent.Link(filename, node)
 		if err != nil {
-			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: err}
+			return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: err}
 		}
 		// No need to initialize store - it handles non-existent files gracefully
 	}
@@ -258,7 +258,7 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		if access == os.O_RDONLY && node.Mode&absfs.OS_ALL_R == 0 ||
 			access == os.O_WRONLY && node.Mode&absfs.OS_ALL_W == 0 ||
 			access == os.O_RDWR && (node.Mode&absfs.OS_ALL_R == 0 || node.Mode&absfs.OS_ALL_W == 0) {
-			return &absfs.InvalidFile{name}, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
+			return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: os.ErrPermission}
 		}
 	}
 	return &File{fs: fs, name: name, flags: flag, node: node}, nil
