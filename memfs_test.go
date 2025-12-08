@@ -544,3 +544,76 @@ func TestRemoveNonEmptyDirectory(t *testing.T) {
 		t.Errorf("Directory should still exist: %v", err)
 	}
 }
+
+// TestOpenFileAppend verifies that O_APPEND works correctly.
+// Writes to files opened with O_APPEND should always append to the end.
+func TestOpenFileAppend(t *testing.T) {
+	fs, err := memfs.NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create initial file with content
+	f, err := fs.Create("/append.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Write([]byte("original\n"))
+	f.Close()
+
+	// Open for append
+	f, err = fs.OpenFile("/append.txt", os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("failed to open for append: %v", err)
+	}
+
+	// Write should append, not overwrite
+	_, err = f.Write([]byte("appended\n"))
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	f.Close()
+
+	// Read back and verify
+	f, _ = fs.Open("/append.txt")
+	data := make([]byte, 100)
+	n, _ := f.Read(data)
+	f.Close()
+
+	content := string(data[:n])
+	expected := "original\nappended\n"
+	if content != expected {
+		t.Errorf("O_APPEND failed: expected %q, got %q", expected, content)
+	}
+}
+
+// TestOpenFileAppendMultipleWrites verifies multiple appends work correctly.
+func TestOpenFileAppendMultipleWrites(t *testing.T) {
+	fs, err := memfs.NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create file and open for append
+	f, err := fs.OpenFile("/multi.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Multiple writes
+	f.Write([]byte("line1\n"))
+	f.Write([]byte("line2\n"))
+	f.Write([]byte("line3\n"))
+	f.Close()
+
+	// Verify
+	f, _ = fs.Open("/multi.txt")
+	data := make([]byte, 100)
+	n, _ := f.Read(data)
+	f.Close()
+
+	expected := "line1\nline2\nline3\n"
+	if string(data[:n]) != expected {
+		t.Errorf("Multiple appends failed: expected %q, got %q", expected, string(data[:n]))
+	}
+}

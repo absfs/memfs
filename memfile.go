@@ -98,7 +98,8 @@ func (f *File) ReadAt(b []byte, off int64) (n int, err error) {
 //
 // Returns the number of bytes written and any error encountered. The file's
 // data is automatically expanded if necessary. Returns an error if the file
-// was not opened for writing.
+// was not opened for writing. If the file was opened with O_APPEND, writes
+// always append to the end of the file regardless of the current offset.
 func (f *File) Write(p []byte) (int, error) {
 	if f.flags&absfs.O_ACCESS == os.O_RDONLY {
 		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
@@ -107,16 +108,24 @@ func (f *File) Write(p []byte) (int, error) {
 		return 0, &os.PathError{Op: "write", Path: f.name, Err: syscall.EBADF}
 	}
 
-	n, err := f.fs.store.WriteAt(f.node.Ino, p, f.offset)
+	// O_APPEND: always write at end of file
+	writeOffset := f.offset
+	if f.flags&os.O_APPEND != 0 {
+		writeOffset = f.node.Size
+	}
+
+	n, err := f.fs.store.WriteAt(f.node.Ino, p, writeOffset)
 	if err != nil {
 		return n, err
 	}
-	f.offset += int64(n)
+
+	// Update offset: for O_APPEND, move to end of written data
+	newOffset := writeOffset + int64(n)
+	f.offset = newOffset
 
 	// Update inode size if we wrote beyond the current size
-	newSize := f.offset
-	if newSize > f.node.Size {
-		f.node.Size = newSize
+	if newOffset > f.node.Size {
+		f.node.Size = newOffset
 	}
 
 	return n, nil
