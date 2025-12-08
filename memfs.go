@@ -440,8 +440,8 @@ func (fs *FileSystem) Chtimes(name string, atime time.Time, mtime time.Time) err
 		}
 	}
 
-	node.Atime = atime
-	node.Mtime = mtime
+	node.SetAtime(atime)
+	node.SetMtime(mtime)
 	return nil
 }
 

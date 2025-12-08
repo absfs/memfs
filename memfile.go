@@ -362,7 +362,7 @@ func (i *fileinfo) Size() int64 {
 
 // ModTime returns the modification time of the file.
 func (i *fileinfo) ModTime() time.Time {
-	return i.node.Mtime
+	return i.node.Mtime()
 }
 
 // Mode returns the file mode and permission bits.
