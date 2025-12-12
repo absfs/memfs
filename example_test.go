@@ -7,6 +7,7 @@ import (
 	"path"
 	"testing"
 
+	"github.com/absfs/fstools"
 	"github.com/absfs/memfs"
 )
 
@@ -220,7 +221,7 @@ func Example_walkFileTree() {
 	fs.Create("/project/src/utils/helpers.go")
 
 	// Walk the file tree
-	fs.Walk("/project", func(path string, info os.FileInfo, err error) error {
+	fstools.Walk(fs,"/project", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -642,7 +643,7 @@ func BenchmarkWalk(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		fs.Walk("/project", func(path string, info os.FileInfo, err error) error {
+		fstools.Walk(fs,"/project", func(path string, info os.FileInfo, err error) error {
 			return nil
 		})
 	}

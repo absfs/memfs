@@ -3,8 +3,10 @@ package memfs
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path"
+	"sort"
 	"syscall"
 	"time"
 
@@ -228,7 +230,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	// Filter out "." and ".." entries to match os package behavior
 	var dirs []*inode.DirEntry
 	for _, entry := range f.node.Dir {
-		if entry.Name != "." && entry.Name != ".." {
+		if entry.Name() != "." && entry.Name() != ".." {
 			dirs = append(dirs, entry)
 		}
 	}
@@ -237,7 +239,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 	if n < 1 {
 		infos := make([]os.FileInfo, len(dirs))
 		for i, entry := range dirs {
-			infos[i] = &fileinfo{entry.Name, entry.Inode}
+			infos[i] = &fileinfo{entry.Name(), entry.Inode}
 		}
 		f.diroffset = len(dirs)
 		return infos, nil
@@ -258,7 +260,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 
 	infos := make([]os.FileInfo, count)
 	for i, entry := range dirs[f.diroffset:end] {
-		infos[i] = &fileinfo{entry.Name, entry.Inode}
+		infos[i] = &fileinfo{entry.Name(), entry.Inode}
 	}
 	// Update offset for next read to continue from where we left off
 	f.diroffset = end
@@ -286,7 +288,7 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 	// Filter out "." and ".." entries to match os package behavior
 	var dirs []*inode.DirEntry
 	for _, entry := range f.node.Dir {
-		if entry.Name != "." && entry.Name != ".." {
+		if entry.Name() != "." && entry.Name() != ".." {
 			dirs = append(dirs, entry)
 		}
 	}
@@ -295,7 +297,7 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 	if n < 1 {
 		list = make([]string, len(dirs))
 		for i, entry := range dirs {
-			list[i] = entry.Name
+			list[i] = entry.Name()
 		}
 		f.diroffset = len(dirs)
 		return list, nil
@@ -314,10 +316,85 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 
 	list = make([]string, count)
 	for i, entry := range dirs[f.diroffset:end] {
-		list[i] = entry.Name
+		list[i] = entry.Name()
 	}
 	f.diroffset = end
 	return list, nil
+}
+
+// ReadDir reads the contents of the directory and returns a slice of up to n
+// DirEntry values in directory order. This is the modern Go 1.16+ equivalent
+// of Readdir that returns lightweight DirEntry values instead of full FileInfo.
+//
+// If n > 0, ReadDir returns at most n entries. In this case, if ReadDir
+// returns an empty slice, it will return a non-nil error explaining why.
+// At the end of a directory, the error is io.EOF.
+//
+// If n <= 0, ReadDir returns all entries from the directory in a single slice.
+// In this case, if ReadDir succeeds (reads all the way to the end of the
+// directory), it returns the slice and a nil error.
+func (f *File) ReadDir(n int) ([]fs.DirEntry, error) {
+	if f.node == nil {
+		return nil, &os.PathError{Op: "readdir", Path: f.name, Err: syscall.EBADF}
+	}
+	if !f.node.IsDir() {
+		return nil, syscall.ENOTDIR
+	}
+
+	// Filter out "." and ".." entries to match os package behavior
+	var dirs []*inode.DirEntry
+	for _, entry := range f.node.Dir {
+		if entry.Name() != "." && entry.Name() != ".." {
+			dirs = append(dirs, entry)
+		}
+	}
+
+	// Sort entries by name
+	sort.Slice(dirs, func(i, j int) bool {
+		return dirs[i].Name() < dirs[j].Name()
+	})
+
+	// When n <= 0, read all remaining entries and return nil error
+	if n < 1 {
+		// If already at end, return empty slice with nil error (not EOF)
+		// This matches the behavior of os.ReadDir
+		if f.diroffset >= len(dirs) {
+			return nil, nil
+		}
+		remaining := len(dirs) - f.diroffset
+		entries := make([]fs.DirEntry, remaining)
+		for i, entry := range dirs[f.diroffset:] {
+			entries[i] = &dirEntry{
+				name: entry.Name(),
+				info: &fileinfo{entry.Name(), entry.Inode},
+			}
+		}
+		f.diroffset = len(dirs)
+		return entries, nil
+	}
+
+	// For n > 0, check if we've already read all directory entries
+	if f.diroffset >= len(dirs) {
+		return nil, io.EOF
+	}
+
+	// Calculate the end index, capping at the total number of entries
+	end := f.diroffset + n
+	if end > len(dirs) {
+		end = len(dirs)
+	}
+	count := end - f.diroffset
+
+	entries := make([]fs.DirEntry, count)
+	for i, entry := range dirs[f.diroffset:end] {
+		entries[i] = &dirEntry{
+			name: entry.Name(),
+			info: &fileinfo{entry.Name(), entry.Inode},
+		}
+	}
+	// Update offset for next read to continue from where we left off
+	f.diroffset = end
+	return entries, nil
 }
 
 // Truncate changes the size of the file.
@@ -387,4 +464,30 @@ func (i *fileinfo) Sys() interface{} {
 // IsDir reports whether the file is a directory.
 func (i *fileinfo) IsDir() bool {
 	return i.node.IsDir()
+}
+
+// dirEntry implements fs.DirEntry for directory entries in memfs.
+type dirEntry struct {
+	name string
+	info *fileinfo
+}
+
+// Name returns the name of the file (or subdirectory) described by the entry.
+func (d *dirEntry) Name() string {
+	return d.name
+}
+
+// IsDir reports whether the entry describes a directory.
+func (d *dirEntry) IsDir() bool {
+	return d.info.IsDir()
+}
+
+// Type returns the type bits for the entry.
+func (d *dirEntry) Type() fs.FileMode {
+	return d.info.Mode().Type()
+}
+
+// Info returns the FileInfo for the file or subdirectory described by the entry.
+func (d *dirEntry) Info() (fs.FileInfo, error) {
+	return d.info, nil
 }

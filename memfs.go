@@ -9,10 +9,10 @@
 package memfs
 
 import (
+	"io"
+	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -64,21 +64,6 @@ func NewFS() (*FileSystem, error) {
 	fs.store = NewMemByteStore()
 	// fs.symlinks is sync.Map - zero value is ready to use
 	return fs, nil
-}
-
-// Separator returns the path separator character for this file system.
-//
-// For memfs, this is always '/' (forward slash) regardless of the
-// underlying operating system.
-func (fs *FileSystem) Separator() uint8 {
-	return '/'
-}
-
-// ListSeparator returns the character used to separate paths in a list.
-//
-// For memfs, this is ':' (colon), consistent with UNIX-like systems.
-func (fs *FileSystem) ListSeparator() uint8 {
-	return ':'
 }
 
 // Rename moves or renames a file or directory from oldpath to newpath.
@@ -182,6 +167,7 @@ func (fs *FileSystem) Create(name string) (absfs.File, error) {
 // Supported flags include os.O_RDONLY, os.O_WRONLY, os.O_RDWR, os.O_CREATE,
 // os.O_EXCL, and os.O_TRUNC. The perm argument specifies the file permissions
 // to use if a new file is created. Both absolute and relative paths are supported.
+// Symlinks are followed automatically when opening files.
 // Returns an error if the operation fails due to permission issues, missing
 // parent directories, or flag conflicts.
 func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
@@ -196,10 +182,25 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	if !path.IsAbs(name) {
 		wd = fs.dir
 	}
+
+	// First check if the file exists (without following symlinks for the final component)
 	var exists bool
 	node, err := wd.Resolve(name)
 	if err == nil {
 		exists = true
+		// Follow symlinks for file operations
+		if node.Mode&os.ModeSymlink != 0 {
+			resolvedNode, err := fs.fileStat(fs.cwd, name)
+			if err != nil {
+				// Symlink exists but target doesn't - treat as not found unless creating
+				if flag&os.O_CREATE == 0 {
+					return &absfs.InvalidFile{Path: name}, err
+				}
+				// For O_CREATE with broken symlink, we can't create a file through a broken symlink
+				return &absfs.InvalidFile{Path: name}, err
+			}
+			node = resolvedNode
+		}
 	}
 
 	dir, filename := path.Split(name)
@@ -325,7 +326,7 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
 	name = inode.Abs(fs.cwd, name)
 	dirPath := ""
-	for _, p := range strings.Split(name, string(fs.Separator())) {
+	for _, p := range strings.Split(name, "/") {
 		if p == "" {
 			p = "/"
 		}
@@ -344,7 +345,7 @@ func (fs *FileSystem) cleanupData(node *inode.Inode) {
 	// If it's a directory, recursively clean up children first
 	if node.IsDir() {
 		for _, entry := range node.Dir {
-			if entry.Name != ".." && entry.Name != "." {
+			if entry.Name() != ".." && entry.Name() != "." {
 				fs.cleanupData(entry.Inode)
 			}
 		}
@@ -598,42 +599,37 @@ func (fs *FileSystem) Readlink(name string) (string, error) {
 
 // Symlink creates a symbolic link at newname pointing to oldname.
 //
-// The oldname file must exist. Returns an error if newname already exists
-// as a non-symbolic link, if oldname does not exist, or if the parent
-// directory of newname does not exist.
+// The symlink stores oldname exactly as provided (it can be absolute or relative).
+// Returns an error if newname already exists or if the parent directory of
+// newname does not exist. Note: Unlike some implementations, the target (oldname)
+// does NOT need to exist - broken symlinks are valid.
 func (fs *FileSystem) Symlink(oldname, newname string) error {
 	wd := fs.root
+	abs := newname
 	if !path.IsAbs(newname) {
+		abs = path.Join(fs.cwd, newname)
 		wd = fs.dir
 	}
-	var exists bool
-	newNode, err := wd.Resolve(newname)
-	if err == nil {
-		exists = true
-	}
 
-	if exists && newNode.Mode&os.ModeSymlink == 0 {
+	// Check if newname already exists - symlinks cannot overwrite existing files
+	_, err := wd.Resolve(newname)
+	if err == nil {
 		return &os.PathError{Op: "symlink", Path: newname, Err: syscall.EEXIST}
 	}
-	oldNode, err := wd.Resolve(oldname)
-	if err != nil {
-		return &os.PathError{Op: "symlink", Path: oldname, Err: syscall.ENOENT}
-	}
 
-	if exists {
-		newNode.Mode = oldNode.Mode | os.ModeSymlink
-		fs.symlinks.Store(newNode.Ino, oldname)
-		return nil
-	}
-
-	dir, filename := path.Split(newname)
+	// Resolve parent directory
+	dir, filename := path.Split(abs)
 	dir = path.Clean(dir)
-	parent, err := wd.Resolve(dir)
-	if err != nil {
-		return err
+	parent := fs.root
+	if dir != "/" {
+		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
+		if err != nil {
+			return &os.PathError{Op: "symlink", Path: newname, Err: err}
+		}
 	}
 
-	newNode = fs.ino.New(oldNode.Mode | os.ModeSymlink)
+	// Create symlink inode - symlinks store path as-is, target doesn't need to exist
+	newNode := fs.ino.New(os.ModeSymlink | 0777)
 
 	err = parent.Link(filename, newNode)
 	if err != nil {
@@ -643,67 +639,102 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 	return nil
 }
 
-// Walk traverses the file tree rooted at name, calling fn for each file or directory.
-//
-// The traversal is done depth-first. The function fn is called for each file
-// and directory in the tree, including the root. Returns an error if the walk
-// fails or if fn returns an error.
-func (fs *FileSystem) Walk(name string, fn filepath.WalkFunc) error {
-	var stack []string
-	push := func(p string) {
-		stack = append(stack, p)
+// ReadDir reads the named directory and returns a list of directory entries
+// sorted by filename. This is compatible with io/fs.ReadDirFS.
+func (fs *FileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
+	f, err := fs.Open(name)
+	if err != nil {
+		return nil, err
 	}
-	pop := func() string {
-		p := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		return p
-	}
+	defer f.Close()
 
-	push(name)
-	for len(stack) > 0 {
-		currentPath := pop()
-		info, err := fs.Stat(currentPath)
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			f, err := fs.Open(currentPath)
-			if err != nil {
-				return err
-			}
-
-			names, err := f.Readdirnames(-1)
-			f.Close()
-			if err != nil {
-				return err
-			}
-
-			sort.Sort(sort.Reverse(sort.StringSlice(names)))
-			for _, p := range names {
-				if p == ".." || p == "." {
-					continue
-				}
-				push(path.Join(currentPath, p))
-			}
-		}
-
-		err = fn(currentPath, info, nil)
-		if err != nil {
-			return err
-		}
-
-	}
-	return nil
+	return f.ReadDir(-1)
 }
 
-// FastWalk is a faster version of Walk that only provides the file mode.
-//
-// This method traverses the file tree rooted at name, calling fn for each
-// file or directory with only the path and file mode. This is more efficient
-// than Walk when only the file type is needed.
-func (fs *FileSystem) FastWalk(name string, fn absfs.FastWalkFunc) error {
-	return fs.Walk(name, func(path string, info os.FileInfo, err error) error {
-		return fn(path, info.Mode())
-	})
+// ReadFile reads the named file and returns its contents.
+// This is compatible with io/fs.ReadFileFS.
+func (fs *FileSystem) ReadFile(name string) ([]byte, error) {
+	f, err := fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	// Get file size for efficient allocation
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	// Read entire file
+	data := make([]byte, info.Size())
+	n, err := io.ReadFull(f, data)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+
+	return data[:n], nil
+}
+
+// Sub returns an fs.FS corresponding to the subtree rooted at dir.
+// This is compatible with io/fs.SubFS.
+func (fs *FileSystem) Sub(dir string) (fs.FS, error) {
+	return absfs.FilerToFS(fs, dir)
+}
+
+// subFS is a sub-filesystem rooted at a specific directory.
+type subFS struct {
+	fs   *FileSystem
+	root string
+}
+
+// joinPath joins the root with a relative path, ensuring we don't escape the subtree.
+func (s *subFS) joinPath(name string) string {
+	// Clean the name and ensure it doesn't escape
+	name = path.Clean("/" + name)
+	return path.Join(s.root, name)
+}
+
+func (s *subFS) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
+	return s.fs.OpenFile(s.joinPath(name), flag, perm)
+}
+
+func (s *subFS) Mkdir(name string, perm os.FileMode) error {
+	return s.fs.Mkdir(s.joinPath(name), perm)
+}
+
+func (s *subFS) Remove(name string) error {
+	return s.fs.Remove(s.joinPath(name))
+}
+
+func (s *subFS) Rename(oldpath, newpath string) error {
+	return s.fs.Rename(s.joinPath(oldpath), s.joinPath(newpath))
+}
+
+func (s *subFS) Stat(name string) (os.FileInfo, error) {
+	return s.fs.Stat(s.joinPath(name))
+}
+
+func (s *subFS) Chmod(name string, mode os.FileMode) error {
+	return s.fs.Chmod(s.joinPath(name), mode)
+}
+
+func (s *subFS) Chtimes(name string, atime time.Time, mtime time.Time) error {
+	return s.fs.Chtimes(s.joinPath(name), atime, mtime)
+}
+
+func (s *subFS) Chown(name string, uid, gid int) error {
+	return s.fs.Chown(s.joinPath(name), uid, gid)
+}
+
+func (s *subFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	return s.fs.ReadDir(s.joinPath(name))
+}
+
+func (s *subFS) ReadFile(name string) ([]byte, error) {
+	return s.fs.ReadFile(s.joinPath(name))
+}
+
+func (s *subFS) Sub(dir string) (fs.FS, error) {
+	return absfs.FilerToFS(s, dir)
 }

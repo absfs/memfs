@@ -4,12 +4,11 @@ import (
 	"errors"
 	"io"
 	"os"
-	// "sync" // Unused after removing lockfs tests
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/absfs/fstools"
 	"github.com/absfs/inode"
 	// "github.com/absfs/lockfs" // Commented out until lockfs is updated to absfs 1.0
 )
@@ -885,12 +884,185 @@ func TestRemoveAllEdgeCases(t *testing.T) {
 // memfs is not thread-safe by design; use lockfs for concurrent access.
 func TestConcurrentFileAccess(t *testing.T) {
 	t.Skip("Skipping lockfs tests until lockfs is updated to absfs 1.0 interface")
+	/*
+	raw, err := NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := lockfs.NewFS(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*/
+
+	// Create files first (serially to avoid race on fs.data)
+	for i := 0; i < 10; i++ {
+		name := "/file" + string(rune('0'+i)) + ".txt"
+		f, err := fs.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+
+	var wg sync.WaitGroup
+	errors := make(chan error, 20)
+
+	// Concurrent reads
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			name := "/file" + string(rune('0'+n)) + ".txt"
+			f, err := fs.Open(name)
+			if err != nil {
+				errors <- err
+				return
+			}
+			defer f.Close()
+			buf := make([]byte, 100)
+			f.Read(buf)
+		}(i)
+	}
+
+	// Concurrent writes
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			name := "/file" + string(rune('0'+n)) + ".txt"
+			f, err := fs.OpenFile(name, os.O_WRONLY, 0)
+			if err != nil {
+				errors <- err
+				return
+			}
+			defer f.Close()
+			f.Write([]byte("test data"))
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Error(err)
+	}
 }
 
 // TestConcurrentDirectoryOps tests concurrent directory operations using lockfs.
 // memfs is not thread-safe by design; use lockfs for concurrent access.
 func TestConcurrentDirectoryOps(t *testing.T) {
 	t.Skip("Skipping lockfs tests until lockfs is updated to absfs 1.0 interface")
+	/*
+	raw, err := NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := lockfs.NewFS(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*/
+
+	var wg sync.WaitGroup
+	errors := make(chan error, 30)
+
+	// Concurrent mkdir
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			name := "/dir" + string(rune('0'+n))
+			err := fs.Mkdir(name, 0755)
+			if err != nil {
+				errors <- err
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Concurrent stat
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			name := "/dir" + string(rune('0'+n))
+			_, err := fs.Stat(name)
+			if err != nil {
+				errors <- err
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Concurrent remove (use RemoveAll to avoid issues with empty check)
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			name := "/dir" + string(rune('0'+n))
+			err := fs.RemoveAll(name)
+			if err != nil {
+				errors <- err
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Error(err)
+	}
+}
+
+// TestSymlinkEdgeCases tests edge cases for symlinks
+func TestSymlinkEdgeCases(t *testing.T) {
+	fs, err := NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create target file
+	f, err := fs.Create("/target.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Test creating symlink with relative path
+	fs.Chdir("/")
+	err = fs.Symlink("target.txt", "link.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Test symlink to non-existent file
+	err = fs.Symlink("/nonexistent.txt", "/badlink.txt")
+	if err == nil {
+		t.Error("Should fail to create symlink to non-existent file")
+	}
+
+	// Test updating existing symlink
+	err = fs.Symlink("/target.txt", "/link.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Test symlink when newname exists as non-symlink
+	fs.Create("/regular.txt")
+	err = fs.Symlink("/target.txt", "/regular.txt")
+	if err == nil {
+		t.Error("Should fail when newname exists as non-symlink")
+	}
+
+	// Test symlink without parent directory
+	err = fs.Symlink("/target.txt", "/nonexistent/link.txt")
+	if err == nil {
+		t.Error("Should fail when parent directory doesn't exist")
+	}
 }
 
 // TestWalkEdgeCases tests edge cases for Walk
@@ -904,7 +1076,7 @@ func TestWalkEdgeCases(t *testing.T) {
 	fs.MkdirAll("/a/b", 0755)
 	expectedErr := errors.New("stop walking")
 
-	err = fstools.Walk(fs,"/", func(path string, info os.FileInfo, err error) error {
+	err = fs.Walk("/", func(path string, info os.FileInfo, err error) error {
 		if path == "/a" {
 			return expectedErr
 		}
@@ -916,7 +1088,7 @@ func TestWalkEdgeCases(t *testing.T) {
 	}
 
 	// Test walk on non-existent path
-	err = fstools.Walk(fs,"/nonexistent", func(path string, info os.FileInfo, err error) error {
+	err = fs.Walk("/nonexistent", func(path string, info os.FileInfo, err error) error {
 		return nil
 	})
 
@@ -1173,6 +1345,74 @@ func TestReaddirnamesEdgeCases(t *testing.T) {
 // the inode number, preventing the race condition.
 func TestConcurrentFileCreationRegression(t *testing.T) {
 	t.Skip("Skipping lockfs tests until lockfs is updated to absfs 1.0 interface")
+	/*
+	raw, err := NewFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := lockfs.NewFS(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*/
+
+	const numFiles = 100
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	errChan := make(chan error, numFiles*numGoroutines)
+
+	// Create files concurrently from multiple goroutines
+	for g := 0; g < numGoroutines; g++ {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+			for i := 0; i < numFiles; i++ {
+				name := "/file_" + string(rune('A'+goroutineID)) + "_" + string(rune('0'+i%10)) + string(rune('0'+i/10)) + ".txt"
+				f, err := fs.Create(name)
+				if err != nil {
+					errChan <- err
+					continue
+				}
+				_, err = f.Write([]byte("test data"))
+				if err != nil {
+					errChan <- err
+				}
+				f.Close()
+			}
+		}(g)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// Check for any errors
+	var errs []error
+	for err := range errChan {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		t.Errorf("Got %d errors during concurrent file creation: %v", len(errs), errs[:min(5, len(errs))])
+	}
+
+	// Verify all files were created by counting them using the raw filesystem
+	count := 0
+	err = raw.Walk("/", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedFiles := numFiles * numGoroutines
+	if count != expectedFiles {
+		t.Errorf("Expected %d files, got %d", expectedFiles, count)
+	}
 }
 
 // TestEnsureDataCapacityEdgeCases tests edge cases of the ensureDataCapacity function
@@ -1224,7 +1464,7 @@ func TestWalkErrorPaths(t *testing.T) {
 	// Test that walk handles callback errors
 	callCount := 0
 	customErr := errors.New("custom error")
-	err = fstools.Walk(fs,"/a", func(path string, info os.FileInfo, err error) error {
+	err = fs.Walk("/a", func(path string, info os.FileInfo, err error) error {
 		callCount++
 		if callCount == 2 {
 			return customErr
@@ -1524,7 +1764,7 @@ func TestStressLargeFileCount(t *testing.T) {
 
 	// Verify all files exist
 	count := 0
-	fstools.Walk(fs,"/", func(path string, info os.FileInfo, err error) error {
+	fs.Walk("/", func(path string, info os.FileInfo, err error) error {
 		if !info.IsDir() {
 			count++
 		}
@@ -1700,7 +1940,7 @@ func TestWalkWithCallback(t *testing.T) {
 
 	// Track visited paths
 	visited := make(map[string]bool)
-	err = fstools.Walk(fs,"/a", func(path string, info os.FileInfo, err error) error {
+	err = fs.Walk("/a", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -1915,7 +2155,7 @@ func TestWalkNonExistentPath(t *testing.T) {
 	}
 
 	// Walk non-existent path should return error
-	walkErr := fstools.Walk(fs,"/nonexistent", func(path string, info os.FileInfo, err error) error {
+	walkErr := fs.Walk("/nonexistent", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
