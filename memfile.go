@@ -234,6 +234,7 @@ func (f *File) Readdir(n int) ([]os.FileInfo, error) {
 			dirs = append(dirs, entry)
 		}
 	}
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Name() < dirs[j].Name() })
 
 	// When n <= 0, read all entries and reset offset for next full read
 	if n < 1 {
@@ -292,6 +293,7 @@ func (f *File) Readdirnames(n int) ([]string, error) {
 			dirs = append(dirs, entry)
 		}
 	}
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Name() < dirs[j].Name() })
 
 	// When n <= 0, read all entries and reset offset for next full read
 	if n < 1 {

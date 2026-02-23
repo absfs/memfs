@@ -4,7 +4,5 @@ github.com/absfs/fstesting v0.9.1 h1:xVZzyp1JtPqzbShhvP5WlTXxNiUaThMnTyQpgbIkkh4
 github.com/absfs/fstesting v0.9.1/go.mod h1:2hCAgPZAk8bqzoYsKX7vk/9e2760KK1Fzz+g+QEKVhI=
 github.com/absfs/fstools v0.9.1 h1:TGSlOpPbEMZnXikpseANJ0tm/E7l72vYySnU49KxP4Y=
 github.com/absfs/fstools v0.9.1/go.mod h1:KQVk2BrHQLScHpGQz1bgvqklysYvfklGe8QxUCbfBuc=
-github.com/absfs/inode v1.0.0 h1:Kr0xWyXFb82DHMAuvZCbVc54s8kxO4qSoayzbVYg45g=
-github.com/absfs/inode v1.0.0/go.mod h1:0wHDtqGbzVMIXO3pIIsc0CbMOuwjemn74fCNuus9dEw=
 github.com/absfs/osfs v0.9.1 h1:hGvctzwhW2tcYbPG4qssYXLdtA4/0+aBPPAILA4mN3Q=
 github.com/absfs/osfs v0.9.1/go.mod h1:09TbIaSJnheHmmUD8Yq+MWKsPIQp3B/eXV8ljQIYZ8c=
