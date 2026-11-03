@@ -2,7 +2,9 @@ package memfs
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 )
@@ -167,19 +169,53 @@ func TestMkdirAllPaths(t *testing.T) {
 	mustDo(t, fs.Symlink("/nowhere", "/dangling"))
 	wantErrno(t, "MkdirAll(dangling)", fs.MkdirAll("/dangling/x", 0755), syscall.EEXIST)
 
-	// A symlink loop component.
+	// A symlink loop component: as with os.MkdirAll, the error is the one
+	// Mkdir gives for the unresolvable component.
 	mustDo(t, fs.Symlink("/l2", "/l1"))
 	mustDo(t, fs.Symlink("/l1", "/l2"))
-	wantErrno(t, "MkdirAll(loop)", fs.MkdirAll("/l1/x", 0755), syscall.ELOOP)
+	wantErrno(t, "MkdirAll(loop)", fs.MkdirAll("/l1/x", 0755), syscall.EEXIST)
+	wantErrno(t, "Mkdir(loop/)", fs.Mkdir("/l1/", 0755), errSlashExists())
+
+	// "dir/." exists, although Mkdir cannot create it.
+	mustDo(t, fs.MkdirAll("/a/.", 0755))
 }
 
 func TestOpenFileDanglingSymlink(t *testing.T) {
 	fs := newTestFS(t)
 	mustDo(t, fs.Symlink("/nowhere", "/dangling"))
-	_, err := fs.OpenFile("/dangling", os.O_RDWR|os.O_CREATE, 0644)
-	wantErrno(t, "O_CREATE on dangling", err, syscall.ENOENT)
-	_, err = fs.OpenFile("/dangling", os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
+	_, err := fs.OpenFile("/dangling", os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
 	wantErrno(t, "O_CREATE|O_EXCL on dangling", err, syscall.EEXIST)
+
+	// Without O_EXCL the file is created where the link points, as os does,
+	// through a chain of links, relative ones resolved from the link's
+	// directory.
+	mustDo(t, fs.Mkdir("/d", 0755))
+	mustDo(t, fs.Symlink("../dangling", "/d/rel"))
+	f, err := fs.OpenFile("d/rel", os.O_RDWR|os.O_CREATE, 0644)
+	mustDo(t, err)
+	if _, err := f.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	mustDo(t, f.Close())
+	if b, err := fs.ReadFile("/nowhere"); err != nil || string(b) != "hi" {
+		t.Errorf("/nowhere = %q, %v; want \"hi\"", b, err)
+	}
+	if target, err := fs.Readlink("/dangling"); err != nil || target != "/nowhere" {
+		t.Errorf("Readlink(/dangling) = %q, %v", target, err)
+	}
+
+	// A dangling link whose target lies under a missing directory, or ends
+	// in a slash, or that is empty, still fails.
+	mustDo(t, fs.Symlink("/missing/x", "/deep"))
+	_, err = fs.OpenFile("/deep", os.O_RDWR|os.O_CREATE, 0644)
+	wantErrno(t, "O_CREATE on link into missing dir", err, syscall.ENOENT)
+	mustDo(t, fs.Symlink("/slashed/", "/slash"))
+	_, err = fs.OpenFile("/slash", os.O_RDWR|os.O_CREATE, 0644)
+	wantErrno(t, "O_CREATE on link to name/", err, errSlashCreate())
+	mustDo(t, fs.Symlink("", "/empty"))
+	_, err = fs.OpenFile("/empty", os.O_RDWR|os.O_CREATE, 0644)
+	wantErrno(t, "O_CREATE on empty link", err, syscall.ENOENT)
+
 	_, err = fs.OpenFile("/missing/x", os.O_RDWR|os.O_CREATE, 0644)
 	wantErrno(t, "O_CREATE with missing parent", err, syscall.ENOENT)
 }
@@ -232,5 +268,184 @@ func TestRelativeLinkOps(t *testing.T) {
 	var pe *os.PathError
 	if !errors.As(err, &pe) || pe.Op != "open" || pe.Err != syscall.ENOTDIR {
 		t.Errorf("ReadDir(file) = %v, want open ENOTDIR", err)
+	}
+}
+
+// TestTrailingSlash checks the rules for "name/" under both the Linux and
+// the BSD/macOS conventions, whichever platform the test runs on. The os
+// comparison in notdir_test.go checks the running platform's own rules.
+func TestTrailingSlash(t *testing.T) {
+	saved := linuxSlash
+	defer func() { linuxSlash = saved }()
+
+	type result struct {
+		what string
+		run  func(fs *FileSystem) error
+		bsd  error // nil means success
+		lin  error
+	}
+	open := func(name string, flag int) func(fs *FileSystem) error {
+		return func(fs *FileSystem) error {
+			f, err := fs.OpenFile(name, flag, 0644)
+			if err == nil {
+				f.Close()
+			}
+			return err
+		}
+	}
+	cases := []result{
+		// Resolving "file/" fails in every method, on every Unix.
+		{"Stat(f/)", func(fs *FileSystem) error { _, err := fs.Stat("/f/"); return err }, errNotDir, errNotDir},
+		{"Lstat(flink/)", func(fs *FileSystem) error { _, err := fs.Lstat("/flink/"); return err }, errNotDir, errNotDir},
+		{"Readlink(flink/)", func(fs *FileSystem) error { _, err := fs.Readlink("/flink/"); return err }, errNotDir, errNotDir},
+		{"Stat(slashlink)", func(fs *FileSystem) error { _, err := fs.Stat("/slashlink"); return err }, errNotDir, errNotDir},
+		{"Lstat(dlink/)", func(fs *FileSystem) error { _, err := fs.Lstat("/dlink/"); return err }, nil, nil},
+		{"Open(f/)", open("/f/", os.O_RDONLY), errNotDir, errNotDir},
+		{"Remove(f/)", func(fs *FileSystem) error { return fs.Remove("/f/") }, errNotDir, errNotDir},
+		{"Remove(dlink/)", func(fs *FileSystem) error { return fs.Remove("/dlink/") }, errNotDir, errNotDir},
+		{"Remove(e/)", func(fs *FileSystem) error { return fs.Remove("/e/") }, nil, nil},
+		{"Rename(f/, g)", func(fs *FileSystem) error { return fs.Rename("/f/", "/g") }, errNotDir, errNotDir},
+		{"Rename(f, flink/)", func(fs *FileSystem) error { return fs.Rename("/f", "/flink/") }, errNotDir, errNotDir},
+		{"Rename(e, f/)", func(fs *FileSystem) error { return fs.Rename("/e", "/f/") }, errNotDir, errNotDir},
+		{"Rename(f, dlink/)", func(fs *FileSystem) error { return fs.Rename("/f", "/dlink/") }, syscall.EEXIST, syscall.EEXIST},
+		{"Rename(e/, new/)", func(fs *FileSystem) error { return fs.Rename("/e/", "/new/") }, nil, nil},
+		{"Chmod(f/)", func(fs *FileSystem) error { return fs.Chmod("/f/", 0600) }, errNotDir, errNotDir},
+		{"Truncate(f/)", func(fs *FileSystem) error { return fs.Truncate("/f/", 0) }, errNotDir, errNotDir},
+		{"Mkdir(new/)", func(fs *FileSystem) error { return fs.Mkdir("/new/", 0755) }, nil, nil},
+		{"MkdirAll(new/x/)", func(fs *FileSystem) error { return fs.MkdirAll("/new/x/", 0755) }, nil, nil},
+		{"Mkdir(d/)", func(fs *FileSystem) error { return fs.Mkdir("/d/", 0755) }, syscall.EEXIST, syscall.EEXIST},
+		{"Symlink(x, d/)", func(fs *FileSystem) error { return fs.Symlink("x", "/d/") }, syscall.EEXIST, syscall.EEXIST},
+		{"Symlink(x, new/)", func(fs *FileSystem) error { return fs.Symlink("x", "/new/") }, syscall.ENOENT, syscall.ENOENT},
+		{"Create(f/x/)", open("/f/x/", os.O_RDWR|os.O_CREATE), errNotDir, errNotDir},
+		{"Create(d/)", open("/d/", os.O_RDWR|os.O_CREATE), syscall.EISDIR, syscall.EISDIR},
+		{"OpenFile(d/, O_CREATE|O_EXCL)", open("/d/", os.O_RDWR|os.O_CREATE|os.O_EXCL), syscall.EEXIST, syscall.EISDIR},
+
+		// Where Linux and the BSDs disagree.
+		{"Mkdir(f/)", func(fs *FileSystem) error { return fs.Mkdir("/f/", 0755) }, errNotDir, syscall.EEXIST},
+		{"MkdirAll(f/)", func(fs *FileSystem) error { return fs.MkdirAll("/f/", 0755) }, errNotDir, syscall.EEXIST},
+		{"Symlink(x, flink/)", func(fs *FileSystem) error { return fs.Symlink("x", "/flink/") }, errNotDir, syscall.EEXIST},
+		{"Create(f/)", open("/f/", os.O_RDWR|os.O_CREATE), errNotDir, syscall.EISDIR},
+		{"Create(new/)", open("/new/", os.O_RDWR|os.O_CREATE), syscall.ENOENT, syscall.EISDIR},
+		{"Rename(f, new/)", func(fs *FileSystem) error { return fs.Rename("/f", "/new/") }, syscall.ENOENT, errNotDir},
+	}
+	for _, linux := range []bool{false, true} {
+		linuxSlash = linux
+		for _, c := range cases {
+			fs := newTestFS(t)
+			touch(t, fs, "/f")
+			mustDo(t, fs.Mkdir("/d", 0755))
+			mustDo(t, fs.Mkdir("/e", 0755))
+			mustDo(t, fs.Symlink("f", "/flink"))
+			mustDo(t, fs.Symlink("d", "/dlink"))
+			mustDo(t, fs.Symlink("f/", "/slashlink"))
+
+			want := c.bsd
+			if linux {
+				want = c.lin
+			}
+			err := c.run(fs)
+			if want == nil {
+				if err != nil {
+					t.Errorf("linux=%v %s: %v, want success", linux, c.what, err)
+				}
+			} else {
+				wantErrno(t, fmt.Sprintf("linux=%v %s", linux, c.what), err, want)
+			}
+
+			// Nothing that failed may have touched the file.
+			if fi, err := fs.Lstat("/f"); err != nil || fi.IsDir() {
+				t.Errorf("linux=%v %s: /f damaged: %v, %v", linux, c.what, fi, err)
+			}
+		}
+	}
+}
+
+// TestChdirPhysical checks that Chdir through a symbolic link records the
+// directory it reached, so that Getwd, "." and relative paths agree, as they
+// do with os.
+func TestChdirPhysical(t *testing.T) {
+	for _, steps := range [][]string{{"/l/.."}, {"l/.."}, {"/l", ".."}, {"/l", "../b/.."}} {
+		fs := newTestFS(t)
+		mustDo(t, fs.MkdirAll("/a/b", 0755))
+		mustDo(t, fs.Symlink("/a/b", "/l"))
+		for _, s := range steps {
+			mustDo(t, fs.Chdir(s))
+		}
+		if wd, _ := fs.Getwd(); wd != "/a" {
+			t.Errorf("%v: Getwd = %q, want /a", steps, wd)
+		}
+		touch(t, fs, "x")
+		if _, err := fs.Stat("/a/x"); err != nil {
+			t.Errorf("%v: Create(x) did not create /a/x: %v", steps, err)
+		}
+		if _, err := fs.Stat("b"); err != nil {
+			t.Errorf("%v: Stat(b): %v", steps, err)
+		}
+		entries, err := fs.ReadDir(".")
+		mustDo(t, err)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		if fmt.Sprint(names) != "[b x]" {
+			t.Errorf("%v: ReadDir(.) = %v, want [b x]", steps, names)
+		}
+	}
+
+	// Chdir into the link itself reports the target, like a physical getwd.
+	fs := newTestFS(t)
+	mustDo(t, fs.MkdirAll("/a/b", 0755))
+	mustDo(t, fs.Symlink("a/b", "/l"))
+	mustDo(t, fs.Chdir("/l"))
+	if wd, _ := fs.Getwd(); wd != "/a/b" {
+		t.Errorf("Getwd after Chdir(/l) = %q, want /a/b", wd)
+	}
+	mustDo(t, fs.Chdir("/"))
+	if wd, _ := fs.Getwd(); wd != "/" {
+		t.Errorf("Getwd after Chdir(/) = %q", wd)
+	}
+}
+
+// TestChdirPhysicalMatchesOS repeats the reviewer's sequence on disk.
+func TestChdirPhysicalMatchesOS(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	mustDo(t, err)
+	mustDo(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0755))
+	if err := os.Symlink(filepath.Join(root, "a", "b"), filepath.Join(root, "l")); err != nil {
+		t.Skipf("os symlinks unavailable: %v", err)
+	}
+	wd, err := os.Getwd()
+	mustDo(t, err)
+	defer os.Chdir(wd)
+	mustDo(t, os.Chdir(filepath.Join(root, "l")))
+	mustDo(t, os.Chdir(".."))
+	osWd, err := os.Getwd()
+	mustDo(t, err)
+	osWd, err = filepath.EvalSymlinks(osWd)
+	mustDo(t, err)
+
+	fs := newTestFS(t)
+	mustDo(t, fs.MkdirAll("/a/b", 0755))
+	mustDo(t, fs.Symlink("/a/b", "/l"))
+	mustDo(t, fs.Chdir("/l"))
+	mustDo(t, fs.Chdir(".."))
+	memWd, _ := fs.Getwd()
+
+	rel, err := filepath.Rel(root, osWd)
+	mustDo(t, err)
+	if want := "/" + filepath.ToSlash(rel); memWd != want {
+		t.Errorf("memfs Getwd = %q, os Getwd = %q (relative %q)", memWd, osWd, want)
+	}
+}
+
+func TestPathOfUnlinked(t *testing.T) {
+	fs := newTestFS(t)
+	orphan := fs.ino.NewDir(0755)
+	if _, ok := fs.pathOf(orphan); ok {
+		t.Error("pathOf(orphan without ..) succeeded")
+	}
+	orphan.Link("..", fs.root)
+	if _, ok := fs.pathOf(orphan); ok {
+		t.Error("pathOf(orphan not in its parent) succeeded")
 	}
 }

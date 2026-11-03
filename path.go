@@ -41,7 +41,10 @@ func (fs *FileSystem) absPath(name string) string {
 // against the directory entries, so ".." after a symbolic link leads to the
 // parent of the link's target, as on Unix.
 //
-// A trailing slash is ignored, so "file/" resolves to file. The empty path
+// A trailing slash names a directory, as on Unix: the final component is
+// then followed even if followLast is false, and must resolve to a
+// directory, so "file/" and "link-to-file/" fail with errNotDir. The same
+// applies to a symbolic link whose target ends in a slash. The empty path
 // does not exist.
 func (fs *FileSystem) walk(name string, followLast bool) (*inode.Inode, error) {
 	if name == "" {
@@ -49,10 +52,15 @@ func (fs *FileSystem) walk(name string, followLast bool) (*inode.Inode, error) {
 	}
 	cur := fs.root
 	rest := fs.absPath(name)
+	mustDir := strings.HasSuffix(rest, "/")
+	followLast = followLast || mustDir
 	links := 0
 	for {
 		rest = strings.TrimLeft(rest, "/")
 		if rest == "" {
+			if mustDir && !cur.IsDir() {
+				return nil, errNotDir
+			}
 			return cur, nil
 		}
 		if !cur.IsDir() {
@@ -82,6 +90,9 @@ func (fs *FileSystem) walk(name string, followLast bool) (*inode.Inode, error) {
 		if !ok || target.(string) == "" {
 			return nil, syscall.ENOENT
 		}
+		if last && strings.HasSuffix(target.(string), "/") {
+			mustDir = true
+		}
 		// A relative target is resolved from the directory holding the
 		// link, which is cur; an absolute one restarts at the root.
 		rest = target.(string) + "/" + rest
@@ -97,7 +108,9 @@ func (fs *FileSystem) walk(name string, followLast bool) (*inode.Inode, error) {
 // else, walkParent returns that inode with errNotDir, so that callers can tell
 // this case from a non-directory further up the path (where the inode is nil).
 // The final element is returned without trailing slashes and is empty only
-// when name refers to the root.
+// when name refers to the root. A trailing slash is not checked here: callers
+// that create, remove or rename the final element apply the rules for it
+// themselves (see hasTrailingSlash).
 func (fs *FileSystem) walkParent(name string) (*inode.Inode, string, error) {
 	if name == "" {
 		return nil, "", syscall.ENOENT
@@ -116,4 +129,46 @@ func (fs *FileSystem) walkParent(name string) (*inode.Inode, string, error) {
 		return parent, "", errNotDir
 	}
 	return parent, base, nil
+}
+
+// hasTrailingSlash reports whether name ends in a slash after a final
+// element, as in "dir/", and so names a directory. The root is not such a
+// name.
+func hasTrailingSlash(name string) bool {
+	return strings.HasSuffix(name, "/") && strings.TrimRight(name, "/") != ""
+}
+
+// The errors below are for a trailing slash on a final element that is not,
+// or would not be, a directory. Linux and the BSD-derived kernels (macOS,
+// FreeBSD) disagree on them, and memfs follows whichever the os package
+// follows on the running platform, chosen by linuxSlash.
+
+// errSlashExists is the error from Mkdir or Symlink for "name/" when name
+// exists but does not resolve to a directory: EEXIST on Linux, ENOTDIR
+// elsewhere.
+func errSlashExists() error {
+	if linuxSlash {
+		return syscall.EEXIST
+	}
+	return errNotDir
+}
+
+// errSlashCreate is the error from OpenFile with O_CREATE for "name/" when
+// name does not exist: Linux reports EISDIR for any O_CREATE open of a name
+// with a trailing slash, the BSDs ENOENT.
+func errSlashCreate() error {
+	if linuxSlash {
+		return syscall.EISDIR
+	}
+	return syscall.ENOENT
+}
+
+// errSlashRename is the error from Rename when the old path is not a
+// directory and the new path is "name/" for a missing name: ENOTDIR on
+// Linux, ENOENT elsewhere.
+func errSlashRename() error {
+	if linuxSlash {
+		return errNotDir
+	}
+	return syscall.ENOENT
 }

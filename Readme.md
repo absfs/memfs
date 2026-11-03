@@ -240,10 +240,11 @@ These numbers are approximate and will vary based on hardware and system load.
 
 #### "not a directory" errors
 - A path that runs through something other than a directory, such as
-  `/notes.txt/x`, fails in every path-taking method, as it does with the os
-  package. This covers Mkdir, MkdirAll, Create and OpenFile with `O_CREATE`,
-  Open, Stat, Lstat, Remove, RemoveAll, both sides of Rename, Symlink,
-  Readlink, Chmod, Chtimes, Chown, Lchown, Truncate, ReadDir and Chdir.
+  `/notes.txt/x`, fails as it does with the os package. This covers Mkdir,
+  MkdirAll, Create and OpenFile with `O_CREATE`, Open, Stat, Lstat, Remove,
+  both sides of Rename, Symlink, Readlink, Chmod, Chtimes, Chown, Lchown,
+  Truncate, ReadDir and Chdir. RemoveAll fails on Unix too; on Windows it
+  returns nil, as `os.RemoveAll` does there (see below).
 - The error matches what os returns on the platform the program runs on. It
   wraps `syscall.ENOTDIR`: on Unix that is ENOTDIR, and
   `errors.Is(err, fs.ErrNotExist)` is false; on Windows `syscall.ENOTDIR` is
@@ -254,9 +255,23 @@ These numbers are approximate and will vary based on hardware and system load.
 - Two Windows exceptions copy os there: `Chdir` to a non-directory returns
   `ERROR_DIRECTORY`, and `Rename` to a path whose parent is a regular file
   returns `ERROR_INVALID_PARAMETER`. Neither is `fs.ErrNotExist`.
+- A trailing slash names a directory, as on Unix: `notes.txt/`, or a link to a
+  file followed by a slash, fails with ENOTDIR in Stat, Lstat, Open, Remove,
+  Rename and the rest, and is never resolved to the file. Where Linux and macOS
+  disagree (Mkdir or Symlink on `notes.txt/`, `O_CREATE` on `new/`, Rename of a
+  file to `new/`), memfs returns what the running platform's os returns; on
+  other platforms it follows macOS. With a trailing slash on a link to a
+  directory, Remove and Rename act on the link and fail with ENOTDIR, as Linux
+  does; macOS acts on the directory the link points to.
 - Symbolic links are followed in every component but the last, so a link to a
   regular file in the middle of a path also fails this way, and `..` after a
-  link leads to the parent of the link's target.
+  link leads to the parent of the link's target. `.` and `..` are resolved
+  through the tree, never lexically, so `notes.txt/..` and `notes.txt/./x`
+  fail with ENOTDIR on every platform. This differs from os on Windows, which
+  cleans such paths lexically and succeeds.
+- `Chdir` records the directory it reached, not the spelling of the path, so
+  after `Chdir("/link/..")` `Getwd` reports the parent of the link's target,
+  as `os.Getwd` does.
 
 #### Path separator issues
 - memfs always uses `/` as the path separator, regardless of OS

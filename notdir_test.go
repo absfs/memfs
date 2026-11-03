@@ -42,6 +42,9 @@ func newFixture(t *testing.T) *fixture {
 	}
 	root := t.TempDir()
 	fx := &fixture{mem: mem, root: root}
+	// Chmod("d/") may clear d's search bit; restore it so that the temp
+	// dir can be removed. Cleanups run last first, so this precedes it.
+	t.Cleanup(func() { os.Chmod(fx.osPath("d"), 0755) })
 
 	must := func(err error) {
 		t.Helper()
@@ -88,6 +91,11 @@ type pathOp struct {
 	os   func(p, q string) error
 	q    string // second path argument, relative to the fixture root
 	skip string // GOOS on which the os side cannot be compared
+	// creates is set for methods that create the final element. For them
+	// a trailing slash on a non-directory gives a platform-specific error
+	// (EEXIST, EISDIR or ENOENT on Linux), which only the os comparison
+	// checks.
+	creates bool
 }
 
 func closeOpen(f interface{ Close() error }, err error) error {
@@ -100,19 +108,19 @@ func closeOpen(f interface{ Close() error }, err error) error {
 var epoch = time.Unix(1_000_000_000, 0)
 
 var pathOps = []pathOp{
-	{name: "Mkdir",
+	{name: "Mkdir", creates: true,
 		mem: func(m *FileSystem, p, _ string) error { return m.Mkdir(p, 0755) },
 		os:  func(p, _ string) error { return os.Mkdir(p, 0755) }},
-	{name: "MkdirAll",
+	{name: "MkdirAll", creates: true,
 		mem: func(m *FileSystem, p, _ string) error { return m.MkdirAll(p, 0755) },
 		os:  func(p, _ string) error { return os.MkdirAll(p, 0755) }},
-	{name: "Create",
+	{name: "Create", creates: true,
 		mem: func(m *FileSystem, p, _ string) error { return closeOpen(m.Create(p)) },
 		os:  func(p, _ string) error { return closeOpen(os.Create(p)) }},
-	{name: "OpenFile(O_WRONLY|O_CREATE)",
+	{name: "OpenFile(O_WRONLY|O_CREATE)", creates: true,
 		mem: func(m *FileSystem, p, _ string) error { return closeOpen(m.OpenFile(p, os.O_WRONLY|os.O_CREATE, 0644)) },
 		os:  func(p, _ string) error { return closeOpen(os.OpenFile(p, os.O_WRONLY|os.O_CREATE, 0644)) }},
-	{name: "OpenFile(O_RDWR|O_CREATE|O_EXCL)",
+	{name: "OpenFile(O_RDWR|O_CREATE|O_EXCL)", creates: true,
 		mem: func(m *FileSystem, p, _ string) error {
 			return closeOpen(m.OpenFile(p, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644))
 		},
@@ -135,10 +143,10 @@ var pathOps = []pathOp{
 	{name: "Rename(old)", q: "d/renamed",
 		mem: func(m *FileSystem, p, q string) error { return m.Rename(p, q) },
 		os:  func(p, q string) error { return os.Rename(p, q) }},
-	{name: "Rename(new)", q: "d/f.txt",
+	{name: "Rename(new)", q: "d/f.txt", creates: true,
 		mem: func(m *FileSystem, p, q string) error { return m.Rename(q, p) },
 		os:  func(p, q string) error { return os.Rename(q, p) }},
-	{name: "Symlink", q: "d",
+	{name: "Symlink", creates: true, q: "d",
 		mem: func(m *FileSystem, p, _ string) error { return m.Symlink("d", p) },
 		os:  func(p, _ string) error { return os.Symlink("d", p) }},
 	{name: "Readlink",
@@ -191,7 +199,13 @@ var pathCases = []pathCase{
 	{path: "flink/x", notDir: true, symlink: true},
 	{path: "inside.txt/..", notDir: true, unixOnly: true},
 	{path: "inside.txt/./x", notDir: true, unixOnly: true},
+	{path: "inside.txt/", notDir: true},
+	{path: "d/f.txt/", notDir: true},
+	{path: "flink/", notDir: true, symlink: true},
 	// Controls: these must keep agreeing with os after the fix.
+	{path: "new/"},
+	{path: "d/"},
+	{path: "dlink/", symlink: true},
 	{path: "missing/x"},
 	{path: "d/new"},
 	{path: "dlink/new", symlink: true},
@@ -207,6 +221,17 @@ var knownDivergence = map[string]string{
 	// memfs Readlink returns ("", nil) for a file that is not a link; os
 	// returns EINVAL.
 	"Readlink dlink/f.txt": "memfs Readlink on a regular file",
+	"Readlink d/":          "memfs Readlink on a directory",
+	"Readlink dlink/":      "memfs Readlink on a directory",
+}
+
+// darwinDivergence lists further pairs that differ on macOS only. With a
+// trailing slash on a symbolic link to a directory, macOS removes or renames
+// the directory the link points to; memfs, like Linux, acts on the link
+// itself and so fails with ENOTDIR.
+var darwinDivergence = map[string]string{
+	"Remove dlink/":      "macOS follows the link",
+	"Rename(old) dlink/": "macOS follows the link",
 }
 
 // errorTargets are compared with errors.Is between memfs and os.
@@ -261,6 +286,9 @@ func TestNotDirMatchesOS(t *testing.T) {
 				if why, ok := knownDivergence[key]; ok {
 					t.Skip(why)
 				}
+				if why, ok := darwinDivergence[key]; ok && runtime.GOOS == "darwin" {
+					t.Skip(why)
+				}
 
 				for _, relative := range []bool{false, true} {
 					fx := newFixture(t)
@@ -279,7 +307,8 @@ func TestNotDirMatchesOS(t *testing.T) {
 					memErr := op.mem(fx.mem, memPath, memQ)
 					compareErrors(t, memErr, osErr)
 
-					if pc.notDir && op.name != "MkdirAll" && memErr != nil &&
+					slashCreate := op.creates && strings.HasSuffix(pc.path, "/")
+					if pc.notDir && op.name != "MkdirAll" && !slashCreate && memErr != nil &&
 						!errors.Is(memErr, errNotDir) && !errors.Is(memErr, errRenameParentNotDir) {
 						t.Errorf("relative=%v: memfs err %v is not errNotDir (%v)", relative, memErr, errNotDir)
 					}
