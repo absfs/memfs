@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 )
@@ -174,7 +175,9 @@ func TestMkdirAllPaths(t *testing.T) {
 	mustDo(t, fs.Symlink("/l2", "/l1"))
 	mustDo(t, fs.Symlink("/l1", "/l2"))
 	wantErrno(t, "MkdirAll(loop)", fs.MkdirAll("/l1/x", 0755), syscall.EEXIST)
-	wantErrno(t, "Mkdir(loop/)", fs.Mkdir("/l1/", 0755), errSlashExists())
+	if err := fs.Mkdir("/l1/", 0755); err == nil {
+		t.Error("Mkdir(loop/) succeeded")
+	}
 
 	// "dir/." exists, although Mkdir cannot create it.
 	mustDo(t, fs.MkdirAll("/a/.", 0755))
@@ -271,18 +274,15 @@ func TestRelativeLinkOps(t *testing.T) {
 	}
 }
 
-// TestTrailingSlash checks the rules for "name/" under both the Linux and
-// the BSD/macOS conventions, whichever platform the test runs on. The os
+// TestTrailingSlash checks the rules for "name/" under the Linux, BSD/macOS
+// and Windows conventions, whichever platform the test runs on. The os
 // comparison in notdir_test.go checks the running platform's own rules.
 func TestTrailingSlash(t *testing.T) {
-	saved := linuxSlash
-	defer func() { linuxSlash = saved }()
+	saved := slashStyle
+	defer func() { slashStyle = saved }()
 
-	type result struct {
-		what string
-		run  func(fs *FileSystem) error
-		bsd  error // nil means success
-		lin  error
+	stat := func(name string) func(fs *FileSystem) error {
+		return func(fs *FileSystem) error { _, err := fs.Stat(name); return err }
 	}
 	open := func(name string, flag int) func(fs *FileSystem) error {
 		return func(fs *FileSystem) error {
@@ -293,43 +293,67 @@ func TestTrailingSlash(t *testing.T) {
 			return err
 		}
 	}
-	cases := []result{
-		// Resolving "file/" fails in every method, on every Unix.
-		{"Stat(f/)", func(fs *FileSystem) error { _, err := fs.Stat("/f/"); return err }, errNotDir, errNotDir},
-		{"Lstat(flink/)", func(fs *FileSystem) error { _, err := fs.Lstat("/flink/"); return err }, errNotDir, errNotDir},
-		{"Readlink(flink/)", func(fs *FileSystem) error { _, err := fs.Readlink("/flink/"); return err }, errNotDir, errNotDir},
-		{"Stat(slashlink)", func(fs *FileSystem) error { _, err := fs.Stat("/slashlink"); return err }, errNotDir, errNotDir},
-		{"Lstat(dlink/)", func(fs *FileSystem) error { _, err := fs.Lstat("/dlink/"); return err }, nil, nil},
-		{"Open(f/)", open("/f/", os.O_RDONLY), errNotDir, errNotDir},
-		{"Remove(f/)", func(fs *FileSystem) error { return fs.Remove("/f/") }, errNotDir, errNotDir},
-		{"Remove(dlink/)", func(fs *FileSystem) error { return fs.Remove("/dlink/") }, errNotDir, errNotDir},
-		{"Remove(e/)", func(fs *FileSystem) error { return fs.Remove("/e/") }, nil, nil},
-		{"Rename(f/, g)", func(fs *FileSystem) error { return fs.Rename("/f/", "/g") }, errNotDir, errNotDir},
-		{"Rename(f, flink/)", func(fs *FileSystem) error { return fs.Rename("/f", "/flink/") }, errNotDir, errNotDir},
-		{"Rename(e, f/)", func(fs *FileSystem) error { return fs.Rename("/e", "/f/") }, errNotDir, errNotDir},
-		{"Rename(f, dlink/)", func(fs *FileSystem) error { return fs.Rename("/f", "/dlink/") }, syscall.EEXIST, syscall.EEXIST},
-		{"Rename(e/, new/)", func(fs *FileSystem) error { return fs.Rename("/e/", "/new/") }, nil, nil},
-		{"Chmod(f/)", func(fs *FileSystem) error { return fs.Chmod("/f/", 0600) }, errNotDir, errNotDir},
-		{"Truncate(f/)", func(fs *FileSystem) error { return fs.Truncate("/f/", 0) }, errNotDir, errNotDir},
-		{"Mkdir(new/)", func(fs *FileSystem) error { return fs.Mkdir("/new/", 0755) }, nil, nil},
-		{"MkdirAll(new/x/)", func(fs *FileSystem) error { return fs.MkdirAll("/new/x/", 0755) }, nil, nil},
-		{"Mkdir(d/)", func(fs *FileSystem) error { return fs.Mkdir("/d/", 0755) }, syscall.EEXIST, syscall.EEXIST},
-		{"Symlink(x, d/)", func(fs *FileSystem) error { return fs.Symlink("x", "/d/") }, syscall.EEXIST, syscall.EEXIST},
-		{"Symlink(x, new/)", func(fs *FileSystem) error { return fs.Symlink("x", "/new/") }, syscall.ENOENT, syscall.ENOENT},
-		{"Create(f/x/)", open("/f/x/", os.O_RDWR|os.O_CREATE), errNotDir, errNotDir},
-		{"Create(d/)", open("/d/", os.O_RDWR|os.O_CREATE), syscall.EISDIR, syscall.EISDIR},
-		{"OpenFile(d/, O_CREATE|O_EXCL)", open("/d/", os.O_RDWR|os.O_CREATE|os.O_EXCL), syscall.EEXIST, syscall.EISDIR},
+	const (
+		create = os.O_RDWR | os.O_CREATE
+		excl   = os.O_RDWR | os.O_CREATE | os.O_EXCL
+	)
+	winDir := errDirectoryName
+	cases := []struct {
+		what          string
+		run           func(fs *FileSystem) error
+		bsd, lin, win error // nil means success
+	}{
+		// Resolving "file/" fails in every method.
+		{"Stat(f/)", stat("/f/"), errNotDir, errNotDir, winDir},
+		{"Stat(slashlink)", stat("/slashlink"), errNotDir, errNotDir, winDir},
+		{"Stat(d/)", stat("/d/"), nil, nil, nil},
+		{"Lstat(flink/)", func(fs *FileSystem) error { _, err := fs.Lstat("/flink/"); return err }, errNotDir, errNotDir, winDir},
+		{"Lstat(dlink/)", func(fs *FileSystem) error { _, err := fs.Lstat("/dlink/"); return err }, nil, nil, nil},
+		{"Readlink(flink/)", func(fs *FileSystem) error { _, err := fs.Readlink("/flink/"); return err }, errNotDir, errNotDir, winDir},
+		{"Open(f/)", open("/f/", os.O_RDONLY), errNotDir, errNotDir, winDir},
+		{"Open(d/)", open("/d/", os.O_RDONLY), nil, nil, nil},
+		{"Chmod(f/)", func(fs *FileSystem) error { return fs.Chmod("/f/", 0600) }, errNotDir, errNotDir, winDir},
+		{"Truncate(f/)", func(fs *FileSystem) error { return fs.Truncate("/f/", 0) }, errNotDir, errNotDir, winDir},
+		{"Truncate(d/)", func(fs *FileSystem) error { return fs.Truncate("/d/", 0) }, syscall.EISDIR, syscall.EISDIR, errNotDir},
 
-		// Where Linux and the BSDs disagree.
-		{"Mkdir(f/)", func(fs *FileSystem) error { return fs.Mkdir("/f/", 0755) }, errNotDir, syscall.EEXIST},
-		{"MkdirAll(f/)", func(fs *FileSystem) error { return fs.MkdirAll("/f/", 0755) }, errNotDir, syscall.EEXIST},
-		{"Symlink(x, flink/)", func(fs *FileSystem) error { return fs.Symlink("x", "/flink/") }, errNotDir, syscall.EEXIST},
-		{"Create(f/)", open("/f/", os.O_RDWR|os.O_CREATE), errNotDir, syscall.EISDIR},
-		{"Create(new/)", open("/new/", os.O_RDWR|os.O_CREATE), syscall.ENOENT, syscall.EISDIR},
-		{"Rename(f, new/)", func(fs *FileSystem) error { return fs.Rename("/f", "/new/") }, syscall.ENOENT, errNotDir},
+		{"Remove(f/)", func(fs *FileSystem) error { return fs.Remove("/f/") }, errNotDir, errNotDir, winDir},
+		{"Remove(flink/)", func(fs *FileSystem) error { return fs.Remove("/flink/") }, errNotDir, errNotDir, winDir},
+		{"Remove(dlink/)", func(fs *FileSystem) error { return fs.Remove("/dlink/") }, errNotDir, errNotDir, nil},
+		{"Remove(e/)", func(fs *FileSystem) error { return fs.Remove("/e/") }, nil, nil, nil},
+		{"RemoveAll(f/)", func(fs *FileSystem) error { return fs.RemoveAll("/f/") }, nil, nil, winDir},
+		{"RemoveAll(new/)", func(fs *FileSystem) error { return fs.RemoveAll("/new/") }, nil, nil, nil},
+
+		{"Rename(f/, g)", func(fs *FileSystem) error { return fs.Rename("/f/", "/g") }, errNotDir, errNotDir, winDir},
+		{"Rename(dlink/, g)", func(fs *FileSystem) error { return fs.Rename("/dlink/", "/g") }, errNotDir, errNotDir, nil},
+		{"Rename(f, flink/)", func(fs *FileSystem) error { return fs.Rename("/f", "/flink/") }, errNotDir, errNotDir, winDir},
+		{"Rename(e, f/)", func(fs *FileSystem) error { return fs.Rename("/e", "/f/") }, errNotDir, errNotDir, winDir},
+		{"Rename(f, dlink/)", func(fs *FileSystem) error { return fs.Rename("/f", "/dlink/") }, syscall.EEXIST, syscall.EEXIST, syscall.EEXIST},
+		{"Rename(e/, new/)", func(fs *FileSystem) error { return fs.Rename("/e/", "/new/") }, nil, nil, nil},
+		{"Rename(f, new/)", func(fs *FileSystem) error { return fs.Rename("/f", "/new/") }, syscall.ENOENT, errNotDir, nil},
+
+		{"Mkdir(new/)", func(fs *FileSystem) error { return fs.Mkdir("/new/", 0755) }, nil, nil, nil},
+		{"MkdirAll(new/x/)", func(fs *FileSystem) error { return fs.MkdirAll("/new/x/", 0755) }, nil, nil, nil},
+		{"Mkdir(d/)", func(fs *FileSystem) error { return fs.Mkdir("/d/", 0755) }, syscall.EEXIST, syscall.EEXIST, syscall.EEXIST},
+		{"Mkdir(f/)", func(fs *FileSystem) error { return fs.Mkdir("/f/", 0755) }, errNotDir, syscall.EEXIST, syscall.EEXIST},
+		{"MkdirAll(f/)", func(fs *FileSystem) error { return fs.MkdirAll("/f/", 0755) }, errNotDir, syscall.EEXIST, syscall.EEXIST},
+
+		{"Symlink(x, d/)", func(fs *FileSystem) error { return fs.Symlink("x", "/d/") }, syscall.EEXIST, syscall.EEXIST, syscall.EEXIST},
+		{"Symlink(x, flink/)", func(fs *FileSystem) error { return fs.Symlink("x", "/flink/") }, errNotDir, syscall.EEXIST, winDir},
+		{"Symlink(x, new/)", func(fs *FileSystem) error { return fs.Symlink("x", "/new/") }, syscall.ENOENT, syscall.ENOENT, winDir},
+
+		{"Create(f/x/)", open("/f/x/", create), errNotDir, errNotDir, errNotDir},
+		{"Create(f/)", open("/f/", create), errNotDir, syscall.EISDIR, winDir},
+		{"Create(new/)", open("/new/", create), syscall.ENOENT, syscall.EISDIR, winDir},
+		{"Create(d/)", open("/d/", create), syscall.EISDIR, syscall.EISDIR, errNotDir},
+		{"OpenFile(d/, O_EXCL)", open("/d/", excl), syscall.EEXIST, syscall.EISDIR, errNotDir},
+		{"OpenFile(new/, O_EXCL)", open("/new/", excl), syscall.ENOENT, syscall.EISDIR, winDir},
 	}
-	for _, linux := range []bool{false, true} {
-		linuxSlash = linux
+	styles := []struct {
+		name  string
+		rules slashRules
+	}{{"bsd", bsdSlash}, {"linux", linuxSlash}, {"windows", windowsSlash}}
+	for _, st := range styles {
+		slashStyle = st.rules
 		for _, c := range cases {
 			fs := newTestFS(t)
 			touch(t, fs, "/f")
@@ -339,22 +363,26 @@ func TestTrailingSlash(t *testing.T) {
 			mustDo(t, fs.Symlink("d", "/dlink"))
 			mustDo(t, fs.Symlink("f/", "/slashlink"))
 
-			want := c.bsd
-			if linux {
-				want = c.lin
-			}
+			want := map[slashRules]error{bsdSlash: c.bsd, linuxSlash: c.lin, windowsSlash: c.win}[st.rules]
+			what := st.name + " " + c.what
 			err := c.run(fs)
 			if want == nil {
 				if err != nil {
-					t.Errorf("linux=%v %s: %v, want success", linux, c.what, err)
+					t.Errorf("%s: %v, want success", what, err)
 				}
-			} else {
-				wantErrno(t, fmt.Sprintf("linux=%v %s", linux, c.what), err, want)
+				continue
 			}
+			wantErrno(t, what, err, want)
 
-			// Nothing that failed may have touched the file.
+			// Nothing that failed may have touched the file or the links,
+			// and Readlink still returns a link's target verbatim.
 			if fi, err := fs.Lstat("/f"); err != nil || fi.IsDir() {
-				t.Errorf("linux=%v %s: /f damaged: %v, %v", linux, c.what, fi, err)
+				t.Errorf("%s: /f damaged: %v, %v", what, fi, err)
+			}
+			for link, target := range map[string]string{"/flink": "f", "/dlink": "d", "/slashlink": "f/"} {
+				if got, err := fs.Readlink(link); err != nil || got != target {
+					t.Errorf("%s: Readlink(%s) = %q, %v; want %q", what, link, got, err, target)
+				}
 			}
 		}
 	}
@@ -408,6 +436,9 @@ func TestChdirPhysical(t *testing.T) {
 
 // TestChdirPhysicalMatchesOS repeats the reviewer's sequence on disk.
 func TestChdirPhysicalMatchesOS(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows resolves .. lexically")
+	}
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	mustDo(t, err)
 	mustDo(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0755))

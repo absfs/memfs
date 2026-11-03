@@ -2,6 +2,7 @@ package memfs
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -43,7 +44,7 @@ func (fs *FileSystem) absPath(name string) string {
 //
 // A trailing slash names a directory, as on Unix: the final component is
 // then followed even if followLast is false, and must resolve to a
-// directory, so "file/" and "link-to-file/" fail with errNotDir. The same
+// directory, so "file/" and "link-to-file/" fail with errSlashNotDir. The same
 // applies to a symbolic link whose target ends in a slash. The empty path
 // does not exist.
 func (fs *FileSystem) walk(name string, followLast bool) (*inode.Inode, error) {
@@ -59,7 +60,7 @@ func (fs *FileSystem) walk(name string, followLast bool) (*inode.Inode, error) {
 		rest = strings.TrimLeft(rest, "/")
 		if rest == "" {
 			if mustDir && !cur.IsDir() {
-				return nil, errNotDir
+				return nil, errSlashNotDir()
 			}
 			return cur, nil
 		}
@@ -120,7 +121,12 @@ func (fs *FileSystem) walkParent(name string) (*inode.Inode, string, error) {
 		return fs.root, "", nil
 	}
 	i := strings.LastIndex(abs, "/")
-	dir, base := abs[:i+1], abs[i+1:]
+	dir, base := strings.TrimRight(abs[:i], "/"), abs[i+1:]
+	if dir == "" {
+		dir = "/"
+	}
+	// dir carries no trailing slash, so that a parent that is not a
+	// directory resolves (and is returned below) rather than failing.
 	parent, err := fs.walk(dir, true)
 	if err != nil {
 		return nil, "", err
@@ -138,37 +144,110 @@ func hasTrailingSlash(name string) bool {
 	return strings.HasSuffix(name, "/") && strings.TrimRight(name, "/") != ""
 }
 
-// The errors below are for a trailing slash on a final element that is not,
-// or would not be, a directory. Linux and the BSD-derived kernels (macOS,
-// FreeBSD) disagree on them, and memfs follows whichever the os package
-// follows on the running platform, chosen by linuxSlash.
+// slashRules selects how a trailing slash on a name that is not a directory
+// is reported. Linux, the BSD-derived kernels (macOS, FreeBSD) and Windows
+// each differ, and memfs follows whichever the os package follows on the
+// running platform.
+type slashRules int
 
-// errSlashExists is the error from Mkdir or Symlink for "name/" when name
-// exists but does not resolve to a directory: EEXIST on Linux, ENOTDIR
-// elsewhere.
-func errSlashExists() error {
-	if linuxSlash {
-		return syscall.EEXIST
+const (
+	bsdSlash     slashRules = iota // macOS, the BSDs and other systems
+	linuxSlash                     // Linux and Android
+	windowsSlash                   // Windows
+)
+
+// slashStyle is the rule set in force. It is a variable so that the tests
+// can exercise every rule set on any platform.
+var slashStyle = func() slashRules {
+	switch runtime.GOOS {
+	case "linux", "android":
+		return linuxSlash
+	case "windows":
+		return windowsSlash
+	}
+	return bsdSlash
+}()
+
+// errDirectoryName is ERROR_DIRECTORY, "The directory name is invalid",
+// which Windows reports for "name\" when name is not a directory.
+var errDirectoryName error = syscall.Errno(267)
+
+// errSlashNotDir is the error for resolving "name/" when name exists but is
+// not a directory: ENOTDIR on Unix, ERROR_DIRECTORY on Windows.
+func errSlashNotDir() error {
+	if slashStyle == windowsSlash {
+		return errDirectoryName
 	}
 	return errNotDir
 }
 
 // errSlashCreate is the error from OpenFile with O_CREATE for "name/" when
-// name does not exist: Linux reports EISDIR for any O_CREATE open of a name
-// with a trailing slash, the BSDs ENOENT.
+// name does not exist: Linux reports EISDIR (for any O_CREATE open of a name
+// with a trailing slash), the BSDs ENOENT and Windows ERROR_DIRECTORY.
 func errSlashCreate() error {
-	if linuxSlash {
+	switch slashStyle {
+	case linuxSlash:
 		return syscall.EISDIR
+	case windowsSlash:
+		return errDirectoryName
+	}
+	return syscall.ENOENT
+}
+
+// errSlashSymlink is the error from Symlink for a new name "name/": ENOENT
+// on Unix, ERROR_DIRECTORY on Windows.
+func errSlashSymlink() error {
+	if slashStyle == windowsSlash {
+		return errDirectoryName
 	}
 	return syscall.ENOENT
 }
 
 // errSlashRename is the error from Rename when the old path is not a
 // directory and the new path is "name/" for a missing name: ENOTDIR on
-// Linux, ENOENT elsewhere.
+// Linux and ENOENT on the BSDs. Windows ignores the slash and renames, so
+// for it the result is nil.
 func errSlashRename() error {
-	if linuxSlash {
+	switch slashStyle {
+	case linuxSlash:
 		return errNotDir
+	case windowsSlash:
+		return nil
 	}
 	return syscall.ENOENT
+}
+
+// existsErr is the error for creating name with Mkdir (mkdir set) or Symlink
+// when an entry of that name exists. It is EEXIST, unless name ends in a
+// slash and the entry does not resolve to a directory: then the BSDs report
+// ENOTDIR, Windows ERROR_DIRECTORY for Symlink, and Linux, and Windows for
+// Mkdir, still EEXIST.
+func (fs *FileSystem) existsErr(name string, mkdir bool) error {
+	if !hasTrailingSlash(name) {
+		return syscall.EEXIST
+	}
+	_, err := fs.walk(name, true)
+	if err == nil || slashStyle == linuxSlash || (mkdir && slashStyle == windowsSlash) {
+		return syscall.EEXIST
+	}
+	return err
+}
+
+// slashEntryErr is the error from Remove or Rename for "name/", where node
+// is the entry name refers to without following it, or nil if the operation
+// may go ahead on the entry. A regular file, or a link to one, fails as it
+// would in walk. For a link to a directory Unix also fails with ENOTDIR (as
+// Linux does; macOS would act on the directory the link points to), while
+// Windows acts on the link.
+func (fs *FileSystem) slashEntryErr(name string, node *inode.Inode) error {
+	if !hasTrailingSlash(name) || node.IsDir() {
+		return nil
+	}
+	if _, err := fs.walk(name, true); err != nil {
+		return err
+	}
+	if slashStyle == windowsSlash {
+		return nil
+	}
+	return errNotDir
 }

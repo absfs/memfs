@@ -255,14 +255,17 @@ These numbers are approximate and will vary based on hardware and system load.
 - Two Windows exceptions copy os there: `Chdir` to a non-directory returns
   `ERROR_DIRECTORY`, and `Rename` to a path whose parent is a regular file
   returns `ERROR_INVALID_PARAMETER`. Neither is `fs.ErrNotExist`.
-- A trailing slash names a directory, as on Unix: `notes.txt/`, or a link to a
-  file followed by a slash, fails with ENOTDIR in Stat, Lstat, Open, Remove,
-  Rename and the rest, and is never resolved to the file. Where Linux and macOS
-  disagree (Mkdir or Symlink on `notes.txt/`, `O_CREATE` on `new/`, Rename of a
-  file to `new/`), memfs returns what the running platform's os returns; on
-  other platforms it follows macOS. With a trailing slash on a link to a
-  directory, Remove and Rename act on the link and fail with ENOTDIR, as Linux
-  does; macOS acts on the directory the link points to.
+- A trailing slash names a directory: `notes.txt/`, or a link to a file
+  followed by a slash, is never resolved to the file. Stat, Lstat, Open,
+  Remove, Rename and the rest fail with ENOTDIR on Unix and with
+  `ERROR_DIRECTORY` ("The directory name is invalid", not `fs.ErrNotExist`)
+  on Windows, as os does. Where the platforms disagree (Mkdir or Symlink on
+  `notes.txt/`, `O_CREATE` on `new/` or `dir/`, Rename of a file to `new/`),
+  memfs returns what os returns on the running platform: Linux, Windows, or
+  the macOS/BSD rules everywhere else. With a trailing slash on a link to a
+  directory, Remove and Rename act on the link: on Unix they fail with
+  ENOTDIR, as Linux does (macOS would act on the directory the link points
+  to), and on Windows they succeed, as os does there.
 - Symbolic links are followed in every component but the last, so a link to a
   regular file in the middle of a path also fails this way, and `..` after a
   link leads to the parent of the link's target. `.` and `..` are resolved

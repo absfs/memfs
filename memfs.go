@@ -104,9 +104,8 @@ func (fs *FileSystem) Rename(oldpath, newpath string) error {
 		return linkErr
 	}
 	node := src.Inode
-	if hasTrailingSlash(oldpath) && !node.IsDir() {
-		// "file/" or "link/": the entry itself must be a directory.
-		linkErr.Err = errNotDir
+	if err := fs.slashEntryErr(oldpath, node); err != nil {
+		linkErr.Err = err
 		return linkErr
 	}
 
@@ -136,8 +135,10 @@ func (fs *FileSystem) Rename(oldpath, newpath string) error {
 		return linkErr
 	}
 	if newSlash && !node.IsDir() {
-		linkErr.Err = errSlashRename()
-		return linkErr
+		if err := errSlashRename(); err != nil {
+			linkErr.Err = err
+			return linkErr
+		}
 	}
 	if node.IsDir() && fs.isWithin(dstParent, node) {
 		linkErr.Err = syscall.EINVAL
@@ -301,7 +302,8 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: err}
 	}
 
-	if create && linuxSlash && hasTrailingSlash(name) {
+	slash := hasTrailingSlash(name)
+	if create && slash && slashStyle == linuxSlash {
 		// Linux refuses O_CREATE on "name/" once the parent resolves,
 		// whatever name is.
 		if _, _, err := fs.walkParent(name); err != nil {
@@ -315,6 +317,11 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 	node, err := fs.walk(name, true)
 	switch {
 	case err == nil:
+		// Windows cannot open "dir\" for writing or creation at all.
+		if node.IsDir() && slash && slashStyle == windowsSlash &&
+			(create || truncate || access != os.O_RDONLY) {
+			return fail(errNotDir)
+		}
 		// err if exclusive create is required
 		if create && excl {
 			return fail(syscall.EEXIST)
@@ -404,7 +411,12 @@ func (fs *FileSystem) Truncate(name string, size int64) error {
 		return &os.PathError{Op: "truncate", Path: name, Err: err}
 	}
 	if child.IsDir() {
-		return &os.PathError{Op: "truncate", Path: name, Err: syscall.EISDIR}
+		var err error = syscall.EISDIR
+		if hasTrailingSlash(name) && slashStyle == windowsSlash {
+			// As in OpenFile, Windows cannot open "dir\" for writing.
+			err = errNotDir
+		}
+		return &os.PathError{Op: "truncate", Path: name, Err: err}
 	}
 
 	err = fs.store.Truncate(child.Ino, size)
@@ -426,7 +438,7 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 		return &os.PathError{Op: "mkdir", Path: name, Err: err}
 	}
 	if filename == "" || parent.Lookup(filename) != nil {
-		return &os.PathError{Op: "mkdir", Path: name, Err: fs.existsErr(name)}
+		return &os.PathError{Op: "mkdir", Path: name, Err: fs.existsErr(name, true)}
 	}
 
 	// Link cannot fail: parent is a directory.
@@ -435,18 +447,6 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 	child.Link("..", parent)
 	// No need to initialize store - it handles non-existent files gracefully
 	return nil
-}
-
-// existsErr is the error for creating name with Mkdir or Symlink when an
-// entry of that name exists: EEXIST, unless name ends in a slash and the
-// entry does not resolve to a directory (see errSlashExists).
-func (fs *FileSystem) existsErr(name string) error {
-	if hasTrailingSlash(name) {
-		if _, err := fs.walk(name, true); err != nil {
-			return errSlashExists()
-		}
-	}
-	return syscall.EEXIST
 }
 
 // MkdirAll creates a directory and all necessary parent directories.
@@ -532,9 +532,8 @@ func (fs *FileSystem) Remove(name string) (err error) {
 		return &os.PathError{Op: "remove", Path: name, Err: syscall.ENOENT}
 	}
 	child := entry.Inode
-	if hasTrailingSlash(name) && !child.IsDir() {
-		// "file/" or "link/": the entry itself must be a directory.
-		return &os.PathError{Op: "remove", Path: name, Err: errNotDir}
+	if err := fs.slashEntryErr(name, child); err != nil {
+		return &os.PathError{Op: "remove", Path: name, Err: err}
 	}
 
 	// Directories always contain "." and ".." entries internally,
@@ -557,6 +556,13 @@ func (fs *FileSystem) Remove(name string) (err error) {
 // through a regular file is an error on Unix (ENOTDIR) but, as with os on
 // Windows, counts as not existing there.
 func (fs *FileSystem) RemoveAll(name string) error {
+	if slashStyle == windowsSlash && hasTrailingSlash(name) {
+		// os on Windows cannot remove "file\" and reports why; on Unix
+		// os.RemoveAll drops the trailing slash.
+		if _, err := fs.walk(name, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return &os.PathError{Op: "remove", Path: name, Err: err}
+		}
+	}
 	parent, filename, err := fs.walkParent(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -694,12 +700,12 @@ func (fs *FileSystem) Symlink(oldname, newname string) error {
 
 	// Symlinks cannot overwrite existing files
 	if filename == "" || parent.Lookup(filename) != nil {
-		linkErr.Err = fs.existsErr(newname)
+		linkErr.Err = fs.existsErr(newname, false)
 		return linkErr
 	}
 	if hasTrailingSlash(newname) {
 		// A link is never a directory, so "new/" cannot name one.
-		linkErr.Err = syscall.ENOENT
+		linkErr.Err = errSlashSymlink()
 		return linkErr
 	}
 

@@ -21,7 +21,3 @@ var (
 	// ERROR_PATH_NOT_FOUND.
 	errRenameParentNotDir error = syscall.Errno(87) // ERROR_INVALID_PARAMETER
 )
-
-// linuxSlash selects the Linux rules for a trailing slash on a name that is
-// not a directory. See errors_other.go.
-var linuxSlash = false

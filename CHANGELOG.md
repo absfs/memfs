@@ -18,8 +18,9 @@
 - A trailing slash on a name that is not a directory fails with ENOTDIR, as
   on Unix, instead of being ignored: `Remove("file/")` and
   `Rename("file/", x)` no longer delete or move the file, and `Create("new/")`
-  no longer creates a regular file. Where Linux and macOS give different
-  errors, memfs gives the running platform's.
+  no longer creates a regular file. On Windows the error is
+  `ERROR_DIRECTORY`, as with os there. Where Linux, macOS and Windows give
+  different errors, memfs gives the running platform's.
 - `OpenFile` with `O_CREATE` (without `O_EXCL`) on a dangling symbolic link
   creates the link's target, as os does. It used to fail with ENOENT.
 - `MkdirAll` follows `os.MkdirAll` step for step, so a dangling or looping

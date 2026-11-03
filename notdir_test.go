@@ -225,13 +225,28 @@ var knownDivergence = map[string]string{
 	"Readlink dlink/":      "memfs Readlink on a directory",
 }
 
-// darwinDivergence lists further pairs that differ on macOS only. With a
-// trailing slash on a symbolic link to a directory, macOS removes or renames
-// the directory the link points to; memfs, like Linux, acts on the link
-// itself and so fails with ENOTDIR.
-var darwinDivergence = map[string]string{
-	"Remove dlink/":      "macOS follows the link",
-	"Rename(old) dlink/": "macOS follows the link",
+// osDivergence lists further pairs that differ on one platform only.
+var osDivergence = map[string]map[string]string{
+	// With a trailing slash on a symbolic link to a directory, macOS removes
+	// or renames the directory the link points to; memfs, like Linux, acts
+	// on the link itself and so fails with ENOTDIR.
+	"darwin": {
+		"Remove dlink/":      "macOS follows the link",
+		"Rename(old) dlink/": "macOS follows the link",
+	},
+	"windows": {
+		// os on Windows replaces an existing file, ignoring the trailing
+		// separator; memfs Rename never replaces.
+		"Rename(new) inside.txt/": "memfs Rename does not overwrite",
+		"Rename(new) d/f.txt/":    "memfs Rename does not overwrite",
+		"Rename(new) flink/":      "memfs Rename does not overwrite",
+		// Windows reports ERROR_ACCESS_DENIED for an existing directory as
+		// the new name; memfs reports EEXIST.
+		"Rename(new) d/":     "Windows denies access to a directory",
+		"Rename(new) dlink/": "Windows denies access to a directory",
+		"Symlink d/":         "Windows denies access to a directory",
+		"Symlink dlink/":     "Windows denies access to a directory",
+	},
 }
 
 // errorTargets are compared with errors.Is between memfs and os.
@@ -286,7 +301,7 @@ func TestNotDirMatchesOS(t *testing.T) {
 				if why, ok := knownDivergence[key]; ok {
 					t.Skip(why)
 				}
-				if why, ok := darwinDivergence[key]; ok && runtime.GOOS == "darwin" {
+				if why, ok := osDivergence[runtime.GOOS][key]; ok {
 					t.Skip(why)
 				}
 
@@ -309,7 +324,8 @@ func TestNotDirMatchesOS(t *testing.T) {
 
 					slashCreate := op.creates && strings.HasSuffix(pc.path, "/")
 					if pc.notDir && op.name != "MkdirAll" && !slashCreate && memErr != nil &&
-						!errors.Is(memErr, errNotDir) && !errors.Is(memErr, errRenameParentNotDir) {
+						!errors.Is(memErr, errNotDir) && !errors.Is(memErr, errRenameParentNotDir) &&
+						!errors.Is(memErr, errSlashNotDir()) {
 						t.Errorf("relative=%v: memfs err %v is not errNotDir (%v)", relative, memErr, errNotDir)
 					}
 				}
@@ -340,4 +356,27 @@ func TestMkdirAllThroughFile(t *testing.T) {
 	if fi, _ := fx.mem.Stat("/inside.txt"); fi.IsDir() {
 		t.Error("inside.txt turned into a directory")
 	}
+}
+
+// TestCreateThroughDanglingLinkMatchesOS checks that O_CREATE without O_EXCL
+// on a dangling symbolic link creates the link's target, as os does, and
+// that O_EXCL fails with EEXIST.
+func TestCreateThroughDanglingLinkMatchesOS(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Symlink("gone.txt", filepath.Join(root, "dang")); err != nil {
+		t.Skipf("os symlinks unavailable: %v", err)
+	}
+	mem := newTestFS(t)
+	mustDo(t, mem.Symlink("gone.txt", "/dang"))
+
+	osErr := closeOpen(os.OpenFile(filepath.Join(root, "dang"), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644))
+	memErr := closeOpen(mem.OpenFile("/dang", os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644))
+	compareErrors(t, memErr, osErr)
+
+	osErr = closeOpen(os.OpenFile(filepath.Join(root, "dang"), os.O_WRONLY|os.O_CREATE, 0644))
+	memErr = closeOpen(mem.OpenFile("/dang", os.O_WRONLY|os.O_CREATE, 0644))
+	compareErrors(t, memErr, osErr)
+	_, osErr = os.Lstat(filepath.Join(root, "gone.txt"))
+	_, memErr = mem.Lstat("/gone.txt")
+	compareErrors(t, memErr, osErr)
 }
