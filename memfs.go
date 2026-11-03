@@ -556,9 +556,10 @@ func (fs *FileSystem) Remove(name string) (err error) {
 // through a regular file is an error on Unix (ENOTDIR) but, as with os on
 // Windows, counts as not existing there.
 func (fs *FileSystem) RemoveAll(name string) error {
-	if slashStyle == windowsSlash && hasTrailingSlash(name) {
-		// os on Windows cannot remove "file\" and reports why; on Unix
-		// os.RemoveAll drops the trailing slash.
+	if slashStyle == windowsSlash && removeAllKeepsSlash && hasTrailingSlash(name) {
+		// Before Go 1.25, os on Windows cannot remove "file\" and reports
+		// why. On Unix, and on Windows since, os.RemoveAll drops the
+		// trailing slash.
 		if _, err := fs.walk(name, false); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return &os.PathError{Op: "remove", Path: name, Err: err}
 		}

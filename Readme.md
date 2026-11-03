@@ -265,7 +265,9 @@ These numbers are approximate and will vary based on hardware and system load.
   the macOS/BSD rules everywhere else. With a trailing slash on a link to a
   directory, Remove and Rename act on the link: on Unix they fail with
   ENOTDIR, as Linux does (macOS would act on the directory the link points
-  to), and on Windows they succeed, as os does there.
+  to), and on Windows they succeed, as os does there. RemoveAll drops a
+  trailing slash and removes `notes.txt`, as `os.RemoveAll` does, except on
+  Windows with Go before 1.25, where os fails with `ERROR_DIRECTORY`.
 - Symbolic links are followed in every component but the last, so a link to a
   regular file in the middle of a path also fails this way, and `..` after a
   link leads to the parent of the link's target. `.` and `..` are resolved

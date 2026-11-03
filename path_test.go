@@ -293,6 +293,14 @@ func TestTrailingSlash(t *testing.T) {
 			return err
 		}
 	}
+	removeAll := func(name string, keepsSlash bool) func(fs *FileSystem) error {
+		return func(fs *FileSystem) error {
+			saved := removeAllKeepsSlash
+			defer func() { removeAllKeepsSlash = saved }()
+			removeAllKeepsSlash = keepsSlash
+			return fs.RemoveAll(name)
+		}
+	}
 	const (
 		create = os.O_RDWR | os.O_CREATE
 		excl   = os.O_RDWR | os.O_CREATE | os.O_EXCL
@@ -320,7 +328,8 @@ func TestTrailingSlash(t *testing.T) {
 		{"Remove(flink/)", func(fs *FileSystem) error { return fs.Remove("/flink/") }, errNotDir, errNotDir, winDir},
 		{"Remove(dlink/)", func(fs *FileSystem) error { return fs.Remove("/dlink/") }, errNotDir, errNotDir, nil},
 		{"Remove(e/)", func(fs *FileSystem) error { return fs.Remove("/e/") }, nil, nil, nil},
-		{"RemoveAll(f/)", func(fs *FileSystem) error { return fs.RemoveAll("/f/") }, nil, nil, winDir},
+		{"RemoveAll(f/) since Go 1.25", removeAll("/f/", false), nil, nil, nil},
+		{"RemoveAll(f/) before Go 1.25", removeAll("/f/", true), nil, nil, winDir},
 		{"RemoveAll(new/)", func(fs *FileSystem) error { return fs.RemoveAll("/new/") }, nil, nil, nil},
 
 		{"Rename(f/, g)", func(fs *FileSystem) error { return fs.Rename("/f/", "/g") }, errNotDir, errNotDir, winDir},
