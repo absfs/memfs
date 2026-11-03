@@ -73,8 +73,10 @@ func NewFS() (*FileSystem, error) {
 // resolved relative to the current working directory. The root directory
 // cannot be renamed. Returns an error if oldpath does not exist, newpath
 // already exists, a directory would be moved beneath itself, or either
-// path runs through something that is not a directory (ENOTDIR on Unix,
-// ERROR_PATH_NOT_FOUND on Windows, as the os package reports).
+// path runs through something that is not a directory, with the error the
+// os package reports on the running platform: ENOTDIR on Unix; on Windows
+// ERROR_INVALID_PARAMETER when newpath's parent is not a directory and
+// ERROR_PATH_NOT_FOUND otherwise.
 func (fs *FileSystem) Rename(oldpath, newpath string) error {
 	linkErr := &os.LinkError{
 		Op:  "rename",
@@ -104,6 +106,10 @@ func (fs *FileSystem) Rename(oldpath, newpath string) error {
 
 	dstParent, dstName, err := fs.walkParent(newpath)
 	if err != nil {
+		if dstParent != nil {
+			// The new path's parent exists but is not a directory.
+			err = errRenameParentNotDir
+		}
 		linkErr.Err = err
 		return linkErr
 	}
@@ -158,14 +164,15 @@ func (fs *FileSystem) isWithin(dir, node *inode.Inode) bool {
 //
 // The directory must exist and be accessible. Both absolute and relative
 // paths are supported. Returns an error if the path does not exist or is
-// not a directory.
+// not a directory; for the latter the error is the one os.Chdir gives,
+// ENOTDIR on Unix and ERROR_DIRECTORY on Windows.
 func (fs *FileSystem) Chdir(name string) (err error) {
 	node, err := fs.walk(name, true)
 	if err != nil {
 		return &os.PathError{Op: "chdir", Path: name, Err: err}
 	}
 	if !node.IsDir() {
-		return &os.PathError{Op: "chdir", Path: name, Err: syscall.ENOTDIR}
+		return &os.PathError{Op: "chdir", Path: name, Err: errChdirNotDir}
 	}
 
 	fs.cwd = path.Clean(fs.absPath(name))

@@ -9,8 +9,10 @@
   offending path, as `os.MkdirAll` does. `Mkdir` had the same bug.
 - Every path-taking method now fails for a path that runs through a
   non-directory, with the error os gives on the running platform:
-  `syscall.ENOTDIR` on Unix, `ERROR_PATH_NOT_FOUND` (which `errors.Is` treats
-  as `fs.ErrNotExist`) on Windows. Previously such paths returned ENOENT, an
+  `syscall.ENOTDIR`, which on Windows is `ERROR_PATH_NOT_FOUND` and so
+  `fs.ErrNotExist`. As with os on Windows, `Chdir` to a file returns
+  `ERROR_DIRECTORY` and `Rename` under a file returns
+  `ERROR_INVALID_PARAMETER`. Previously such paths returned ENOENT, an
   untyped "not a directory" error (Create, Symlink), or nil (Mkdir,
   MkdirAll).
 - Symbolic links are now followed in intermediate path components, and `..`

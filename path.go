@@ -8,6 +8,13 @@ import (
 	"github.com/absfs/inode"
 )
 
+// errNotDir is the error for a path that runs through something that is not a
+// directory, such as "/file.txt/x". It is what the os package reports for
+// such a path: ENOTDIR on Unix, and on Windows syscall.ENOTDIR is
+// ERROR_PATH_NOT_FOUND, which errors.Is and os.IsNotExist treat as
+// fs.ErrNotExist, exactly as for os.
+var errNotDir error = syscall.ENOTDIR
+
 // maxSymlinks bounds the number of symbolic links expanded while resolving a
 // single path, matching the Linux limit. Exceeding it yields ELOOP.
 const maxSymlinks = 40
@@ -86,9 +93,11 @@ func (fs *FileSystem) walk(name string, followLast bool) (*inode.Inode, error) {
 
 // walkParent resolves the directory that would hold name and returns it with
 // the final path element. The directory part is resolved like walk with every
-// symbolic link followed, and must be a directory (errNotDir otherwise). The
-// final element is returned without trailing slashes and is empty only when
-// name refers to the root.
+// symbolic link followed, and must be a directory. If it resolves to something
+// else, walkParent returns that inode with errNotDir, so that callers can tell
+// this case from a non-directory further up the path (where the inode is nil).
+// The final element is returned without trailing slashes and is empty only
+// when name refers to the root.
 func (fs *FileSystem) walkParent(name string) (*inode.Inode, string, error) {
 	if name == "" {
 		return nil, "", syscall.ENOENT
@@ -104,7 +113,7 @@ func (fs *FileSystem) walkParent(name string) (*inode.Inode, string, error) {
 		return nil, "", err
 	}
 	if !parent.IsDir() {
-		return nil, "", errNotDir
+		return parent, "", errNotDir
 	}
 	return parent, base, nil
 }

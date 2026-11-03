@@ -244,13 +244,16 @@ These numbers are approximate and will vary based on hardware and system load.
   package. This covers Mkdir, MkdirAll, Create and OpenFile with `O_CREATE`,
   Open, Stat, Lstat, Remove, RemoveAll, both sides of Rename, Symlink,
   Readlink, Chmod, Chtimes, Chown, Lchown, Truncate, ReadDir and Chdir.
-- The error matches what os returns on the platform the program runs on: on
-  Unix it wraps `syscall.ENOTDIR`, and `errors.Is(err, fs.ErrNotExist)` is
-  false; on Windows it wraps `ERROR_PATH_NOT_FOUND`, and
-  `errors.Is(err, fs.ErrNotExist)` is true. `MkdirAll` returns
-  `syscall.ENOTDIR` on every platform, naming the offending path, as
-  `os.MkdirAll` does. `RemoveAll` returns nil when there is nothing to remove,
-  so on Windows it returns nil for such a path, again like os.
+- The error matches what os returns on the platform the program runs on. It
+  wraps `syscall.ENOTDIR`: on Unix that is ENOTDIR, and
+  `errors.Is(err, fs.ErrNotExist)` is false; on Windows `syscall.ENOTDIR` is
+  `ERROR_PATH_NOT_FOUND`, and `errors.Is(err, fs.ErrNotExist)` is true.
+  `MkdirAll` names the offending path, as `os.MkdirAll` does. `RemoveAll`
+  returns nil when there is nothing to remove, so on Windows it returns nil for
+  such a path, again like os.
+- Two Windows exceptions copy os there: `Chdir` to a non-directory returns
+  `ERROR_DIRECTORY`, and `Rename` to a path whose parent is a regular file
+  returns `ERROR_INVALID_PARAMETER`. Neither is `fs.ErrNotExist`.
 - Symbolic links are followed in every component but the last, so a link to a
   regular file in the middle of a path also fails this way, and `..` after a
   link leads to the parent of the link's target.

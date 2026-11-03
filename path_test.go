@@ -115,7 +115,8 @@ func TestRenameDirectories(t *testing.T) {
 	wantErrno(t, "Rename missing", fs.Rename("/nope", "/x"), syscall.ENOENT)
 	wantErrno(t, "Rename onto existing", fs.Rename("/file", "/b/marker"), syscall.EEXIST)
 	wantErrno(t, "Rename from through file", fs.Rename("/file/x", "/y"), errNotDir)
-	wantErrno(t, "Rename to through file", fs.Rename("/b/marker", "/file/x"), errNotDir)
+	wantErrno(t, "Rename to under file", fs.Rename("/b/marker", "/file/x"), errRenameParentNotDir)
+	wantErrno(t, "Rename to through file", fs.Rename("/b/marker", "/file/x/y"), errNotDir)
 
 	// Moving a directory to a new parent updates its "..".
 	mustDo(t, fs.Rename("/a/sub", "/b/sub"))
@@ -226,7 +227,7 @@ func TestRelativeLinkOps(t *testing.T) {
 		t.Errorf("Getwd after Chdir(..) = %q", wd)
 	}
 	touch(t, fs, "/file")
-	wantErrno(t, "Chdir(file)", fs.Chdir("/file"), syscall.ENOTDIR)
+	wantErrno(t, "Chdir(file)", fs.Chdir("/file"), errChdirNotDir)
 	_, err = fs.ReadDir("/file")
 	var pe *os.PathError
 	if !errors.As(err, &pe) || pe.Op != "open" || pe.Err != syscall.ENOTDIR {

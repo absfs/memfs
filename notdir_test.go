@@ -16,9 +16,10 @@ import (
 // The tests in this file compare memfs with the os package on a temporary
 // directory for every path-taking method, focusing on paths that run through
 // something that is not a directory ("inside.txt/x"). On Unix such a path
-// fails with ENOTDIR; on Windows the os package reports ERROR_PATH_NOT_FOUND,
-// which errors.Is treats as fs.ErrNotExist. memfs must agree on whichever
-// platform the tests run on.
+// fails with ENOTDIR; on Windows the os package mostly reports
+// ERROR_PATH_NOT_FOUND (which is syscall.ENOTDIR there, and which errors.Is
+// treats as fs.ErrNotExist), with exceptions for Chdir and Rename. memfs must
+// agree on whichever platform the tests run on.
 
 // fixture builds the same tree in memfs and on disk:
 //
@@ -278,7 +279,8 @@ func TestNotDirMatchesOS(t *testing.T) {
 					memErr := op.mem(fx.mem, memPath, memQ)
 					compareErrors(t, memErr, osErr)
 
-					if pc.notDir && op.name != "MkdirAll" && memErr != nil && !errors.Is(memErr, errNotDir) {
+					if pc.notDir && op.name != "MkdirAll" && memErr != nil &&
+						!errors.Is(memErr, errNotDir) && !errors.Is(memErr, errRenameParentNotDir) {
 						t.Errorf("relative=%v: memfs err %v is not errNotDir (%v)", relative, memErr, errNotDir)
 					}
 				}
