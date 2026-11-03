@@ -874,10 +874,10 @@ func TestRemoveAllEdgeCases(t *testing.T) {
 		t.Error("Directory should be removed")
 	}
 
-	// Test RemoveAll on non-existent path
+	// RemoveAll on a non-existent path succeeds, as os.RemoveAll does
 	err = fs.RemoveAll("/nonexistent")
-	if err == nil {
-		t.Error("Should fail for non-existent path")
+	if err != nil {
+		t.Errorf("RemoveAll of non-existent path: %v, want nil", err)
 	}
 }
 
@@ -1606,7 +1606,8 @@ func TestRemoveParentNotExist(t *testing.T) {
 	}
 }
 
-// TestRemoveAllParentNotExist tests RemoveAll when parent path is invalid
+// TestRemoveAllParentNotExist tests RemoveAll when the parent does not
+// exist: like os.RemoveAll, there is nothing to remove and no error.
 func TestRemoveAllParentNotExist(t *testing.T) {
 	fs, err := NewFS()
 	if err != nil {
@@ -1614,8 +1615,8 @@ func TestRemoveAllParentNotExist(t *testing.T) {
 	}
 
 	err = fs.RemoveAll("/nonexistent/dir")
-	if err == nil {
-		t.Error("Should fail when parent directory doesn't exist")
+	if err != nil {
+		t.Errorf("RemoveAll with missing parent: %v, want nil", err)
 	}
 }
 

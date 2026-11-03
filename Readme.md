@@ -238,6 +238,23 @@ These numbers are approximate and will vary based on hardware and system load.
 - Run tests with `-race` flag: `go test -race`
 - Wrap with `lockfs` for concurrent access, or ensure only one goroutine accesses the FileSystem at a time
 
+#### "not a directory" errors
+- A path that runs through something other than a directory, such as
+  `/notes.txt/x`, fails in every path-taking method, as it does with the os
+  package. This covers Mkdir, MkdirAll, Create and OpenFile with `O_CREATE`,
+  Open, Stat, Lstat, Remove, RemoveAll, both sides of Rename, Symlink,
+  Readlink, Chmod, Chtimes, Chown, Lchown, Truncate, ReadDir and Chdir.
+- The error matches what os returns on the platform the program runs on: on
+  Unix it wraps `syscall.ENOTDIR`, and `errors.Is(err, fs.ErrNotExist)` is
+  false; on Windows it wraps `ERROR_PATH_NOT_FOUND`, and
+  `errors.Is(err, fs.ErrNotExist)` is true. `MkdirAll` returns
+  `syscall.ENOTDIR` on every platform, naming the offending path, as
+  `os.MkdirAll` does. `RemoveAll` returns nil when there is nothing to remove,
+  so on Windows it returns nil for such a path, again like os.
+- Symbolic links are followed in every component but the last, so a link to a
+  regular file in the middle of a path also fails this way, and `..` after a
+  link leads to the parent of the link's target.
+
 #### Path separator issues
 - memfs always uses `/` as the path separator, regardless of OS
 - Use `path.Join()` (not `filepath.Join()`) or construct paths with `/` directly

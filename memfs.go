@@ -9,6 +9,7 @@
 package memfs
 
 import (
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -71,7 +72,9 @@ func NewFS() (*FileSystem, error) {
 // Both relative and absolute paths are supported. Relative paths are
 // resolved relative to the current working directory. The root directory
 // cannot be renamed. Returns an error if oldpath does not exist, newpath
-// already exists, or if the operation violates file system constraints.
+// already exists, a directory would be moved beneath itself, or either
+// path runs through something that is not a directory (ENOTDIR on Unix,
+// ERROR_PATH_NOT_FOUND on Windows, as the os package reports).
 func (fs *FileSystem) Rename(oldpath, newpath string) error {
 	linkErr := &os.LinkError{
 		Op:  "rename",
@@ -83,19 +86,72 @@ func (fs *FileSystem) Rename(oldpath, newpath string) error {
 		return linkErr
 	}
 
-	if !path.IsAbs(oldpath) {
-		oldpath = path.Join(fs.cwd, oldpath)
-	}
-
-	if !path.IsAbs(newpath) {
-		newpath = path.Join(fs.cwd, newpath)
-	}
-	err := fs.root.Rename(oldpath, newpath)
+	srcParent, srcName, err := fs.walkParent(oldpath)
 	if err != nil {
 		linkErr.Err = err
 		return linkErr
 	}
+	if isDotName(srcName) {
+		linkErr.Err = syscall.EINVAL
+		return linkErr
+	}
+	src := srcParent.Lookup(srcName)
+	if src == nil {
+		linkErr.Err = syscall.ENOENT
+		return linkErr
+	}
+	node := src.Inode
+
+	dstParent, dstName, err := fs.walkParent(newpath)
+	if err != nil {
+		linkErr.Err = err
+		return linkErr
+	}
+	if isDotName(dstName) {
+		linkErr.Err = syscall.EINVAL
+		return linkErr
+	}
+	if dstParent.Lookup(dstName) != nil {
+		linkErr.Err = syscall.EEXIST
+		return linkErr
+	}
+	if node.IsDir() && fs.isWithin(dstParent, node) {
+		linkErr.Err = syscall.EINVAL
+		return linkErr
+	}
+
+	// Neither parent can fail here: both are directories and the source
+	// entry was found above.
+	dstParent.Link(dstName, node)
+	srcParent.Unlink(srcName)
+	if node.IsDir() && srcParent != dstParent {
+		node.Link("..", dstParent)
+	}
 	return nil
+}
+
+// isDotName reports whether a final path element cannot be created, removed
+// or renamed: the root's empty name, "." and "..".
+func isDotName(name string) bool {
+	return name == "" || name == "." || name == ".."
+}
+
+// isWithin reports whether dir is node or lies beneath it, following ".."
+// entries from dir up to the root.
+func (fs *FileSystem) isWithin(dir, node *inode.Inode) bool {
+	for {
+		if dir == node {
+			return true
+		}
+		if dir == fs.root {
+			return false
+		}
+		up := dir.Lookup("..")
+		if up == nil || up.Inode == dir {
+			return false
+		}
+		dir = up.Inode
+	}
 }
 
 // Chdir changes the current working directory to the named directory.
@@ -104,19 +160,7 @@ func (fs *FileSystem) Rename(oldpath, newpath string) error {
 // paths are supported. Returns an error if the path does not exist or is
 // not a directory.
 func (fs *FileSystem) Chdir(name string) (err error) {
-	if name == "/" {
-		fs.cwd = "/"
-		fs.dir = fs.root
-		return nil
-	}
-	wd := fs.root
-	cwd := name
-	if !path.IsAbs(name) {
-		cwd = path.Join(fs.cwd, name)
-		wd = fs.dir
-	}
-
-	node, err := wd.Resolve(name)
+	node, err := fs.walk(name, true)
 	if err != nil {
 		return &os.PathError{Op: "chdir", Path: name, Err: err}
 	}
@@ -124,7 +168,7 @@ func (fs *FileSystem) Chdir(name string) (err error) {
 		return &os.PathError{Op: "chdir", Path: name, Err: syscall.ENOTDIR}
 	}
 
-	fs.cwd = cwd
+	fs.cwd = path.Clean(fs.absPath(name))
 	fs.dir = node
 	return nil
 }
@@ -178,55 +222,25 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 		return &File{fs: fs, name: name, flags: flag, node: fs.dir}, nil
 	}
 
-	wd := fs.root
-	if !path.IsAbs(name) {
-		wd = fs.dir
-	}
-
-	// First check if the file exists (without following symlinks for the final component)
-	var exists bool
-	node, err := wd.Resolve(name)
-	if err == nil {
-		exists = true
-		// Follow symlinks for file operations
-		if node.Mode&os.ModeSymlink != 0 {
-			resolvedNode, err := fs.fileStat(fs.cwd, name)
-			if err != nil {
-				// Symlink exists but target doesn't - treat as not found unless creating
-				if flag&os.O_CREATE == 0 {
-					return &absfs.InvalidFile{Path: name}, err
-				}
-				// For O_CREATE with broken symlink, we can't create a file through a broken symlink
-				return &absfs.InvalidFile{Path: name}, err
-			}
-			node = resolvedNode
-		}
-	}
-
-	dir, filename := path.Split(name)
-	dir = path.Clean(dir)
-	parent, err := wd.Resolve(dir)
-	if err != nil {
-		return nil, err
-	}
-
 	access := flag & absfs.O_ACCESS
 	create := flag&os.O_CREATE != 0
+	excl := flag&os.O_EXCL != 0
 	truncate := flag&os.O_TRUNC != 0
-
-	// error if it does not exist, and we are not allowed to create it.
-	if !exists && !create {
-		return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: syscall.ENOENT}
+	fail := func(err error) (absfs.File, error) {
+		return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: err}
 	}
-	if exists {
+
+	// Resolve the file, following symlinks. A path through something that
+	// is not a directory fails here, with or without O_CREATE.
+	node, err := fs.walk(name, true)
+	switch {
+	case err == nil:
 		// err if exclusive create is required
-		if create && flag&os.O_EXCL != 0 {
-			return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: syscall.EEXIST}
+		if create && excl {
+			return fail(syscall.EEXIST)
 		}
-		if node.IsDir() {
-			if access != os.O_RDONLY || truncate {
-				return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: syscall.EISDIR} // os.ErrNotExist}
-			}
+		if node.IsDir() && (access != os.O_RDONLY || truncate) {
+			return fail(syscall.EISDIR)
 		}
 
 		// if we must truncate the file
@@ -235,19 +249,26 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 			node.Size = 0
 		}
 
-	} else { // !exists
-		// error if we cannot create the file
-		if !create {
-			return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: syscall.ENOENT} //os.ErrNotExist}
+	case err == syscall.ENOENT && create:
+		parent, filename, err := fs.walkParent(name)
+		if err != nil {
+			return fail(err)
+		}
+		// The name exists but did not resolve: a dangling symlink.
+		if parent.Lookup(filename) != nil {
+			if excl {
+				return fail(syscall.EEXIST)
+			}
+			return fail(syscall.ENOENT)
 		}
 
-		// Create write-able file
+		// Create write-able file. Link cannot fail: parent is a directory.
 		node = fs.ino.New(fs.Umask & perm)
-		err := parent.Link(filename, node)
-		if err != nil {
-			return &absfs.InvalidFile{Path: name}, &os.PathError{Op: "open", Path: name, Err: err}
-		}
+		parent.Link(filename, node)
 		// No need to initialize store - it handles non-existent files gracefully
+
+	default:
+		return fail(err)
 	}
 
 	// For existing files (not newly created), verify that the file's permission bits
@@ -271,15 +292,17 @@ func (fs *FileSystem) OpenFile(name string, flag int, perm os.FileMode) (absfs.F
 // it is extended with zero bytes. Returns an error if the file does not
 // exist.
 func (fs *FileSystem) Truncate(name string, size int64) error {
-	path := inode.Abs(fs.cwd, name)
-	child, err := fs.root.Resolve(path)
+	child, err := fs.walk(name, true)
 	if err != nil {
-		return err
+		return &os.PathError{Op: "truncate", Path: name, Err: err}
+	}
+	if child.IsDir() {
+		return &os.PathError{Op: "truncate", Path: name, Err: syscall.EISDIR}
 	}
 
 	err = fs.store.Truncate(child.Ino, size)
 	if err != nil {
-		return err
+		return &os.PathError{Op: "truncate", Path: name, Err: err}
 	}
 	child.Size = size
 	return nil
@@ -288,30 +311,18 @@ func (fs *FileSystem) Truncate(name string, size int64) error {
 // Mkdir creates a new directory with the specified name and permissions.
 //
 // The parent directory must already exist. Returns an error if the directory
-// already exists, the parent directory does not exist, or if the operation
-// fails.
+// already exists, the parent directory does not exist, or the parent path
+// runs through something that is not a directory.
 func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
-	wd := fs.root
-	abs := name
-	if !path.IsAbs(abs) {
-		abs = path.Join(fs.cwd, abs)
-		wd = fs.dir
+	parent, filename, err := fs.walkParent(name)
+	if err != nil {
+		return &os.PathError{Op: "mkdir", Path: name, Err: err}
 	}
-	_, err := wd.Resolve(name)
-	if err == nil {
+	if filename == "" || parent.Lookup(filename) != nil {
 		return &os.PathError{Op: "mkdir", Path: name, Err: syscall.EEXIST}
 	}
 
-	parent := fs.root
-	dir, filename := path.Split(abs)
-	dir = path.Clean(dir)
-	if dir != "/" {
-		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
-		if err != nil {
-			return &os.PathError{Op: "mkdir", Path: dir, Err: err}
-		}
-	}
-
+	// Link cannot fail: parent is a directory.
 	child := fs.ino.NewDir(fs.Umask & perm)
 	parent.Link(filename, child)
 	child.Link("..", parent)
@@ -322,16 +333,33 @@ func (fs *FileSystem) Mkdir(name string, perm os.FileMode) error {
 // MkdirAll creates a directory and all necessary parent directories.
 //
 // If the directory already exists, MkdirAll does nothing and returns nil.
-// This is similar to the 'mkdir -p' command in Unix.
+// This is similar to the 'mkdir -p' command in Unix. As with os.MkdirAll, if
+// name or any of its ancestors exists but is not a directory, MkdirAll fails
+// with syscall.ENOTDIR, naming the offending path.
 func (fs *FileSystem) MkdirAll(name string, perm os.FileMode) error {
-	name = inode.Abs(fs.cwd, name)
-	dirPath := ""
-	for _, p := range strings.Split(name, "/") {
-		if p == "" {
-			p = "/"
+	// Visit each ancestor of name, then name itself, as the caller spelled
+	// it, so that errors name the same paths os.MkdirAll would.
+	for i := 1; i <= len(name); i++ {
+		if i < len(name) && name[i] != '/' {
+			continue
 		}
-		dirPath = path.Join(dirPath, p)
-		fs.Mkdir(dirPath, perm)
+		dir := name[:i]
+		if strings.HasSuffix(dir, "/") {
+			continue
+		}
+		node, err := fs.walk(dir, true)
+		if err == nil {
+			if !node.IsDir() {
+				return &os.PathError{Op: "mkdir", Path: dir, Err: syscall.ENOTDIR}
+			}
+			continue
+		}
+		if err != syscall.ENOENT {
+			return &os.PathError{Op: "mkdir", Path: dir, Err: err}
+		}
+		if err := fs.Mkdir(dir, perm); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -361,86 +389,69 @@ func (fs *FileSystem) cleanupData(node *inode.Inode) {
 // directory, or if the operation fails. Use RemoveAll to delete
 // non-empty directories.
 func (fs *FileSystem) Remove(name string) (err error) {
-	wd := fs.root
-	abs := name
-	if !path.IsAbs(abs) {
-		abs = path.Join(fs.cwd, abs)
-		wd = fs.dir
-	}
-	child, err := wd.Resolve(name)
+	parent, filename, err := fs.walkParent(name)
 	if err != nil {
 		return &os.PathError{Op: "remove", Path: name, Err: err}
 	}
-
-	if child.IsDir() {
-		// Directories always contain "." and ".." entries internally,
-		// so an empty directory has exactly 2 entries
-		if len(child.Dir) > 2 {
-			return &os.PathError{Op: "remove", Path: name, Err: syscall.ENOTEMPTY}
-		}
+	if isDotName(filename) {
+		return &os.PathError{Op: "remove", Path: name, Err: syscall.EINVAL}
 	}
+	entry := parent.Lookup(filename)
+	if entry == nil {
+		return &os.PathError{Op: "remove", Path: name, Err: syscall.ENOENT}
+	}
+	child := entry.Inode
 
-	parent := fs.root
-	dir, filename := path.Split(abs)
-	dir = path.Clean(dir)
-	if dir != "/" {
-		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
-		if err != nil {
-			return &os.PathError{Op: "remove", Path: dir, Err: err}
-		}
+	// Directories always contain "." and ".." entries internally,
+	// so an empty directory has exactly 2 entries
+	if child.IsDir() && len(child.Dir) > 2 {
+		return &os.PathError{Op: "remove", Path: name, Err: syscall.ENOTEMPTY}
 	}
 
 	// Clean up data before unlinking
 	fs.cleanupData(child)
-
-	return parent.Unlink(filename)
+	parent.Unlink(filename)
+	return nil
 }
 
 // RemoveAll removes the named file or directory and all its contents.
 //
 // Unlike Remove, RemoveAll will recursively delete directories and their
-// contents. Returns an error if the file does not exist or if the operation
-// fails.
+// contents. Symbolic links are removed, not followed. As with os.RemoveAll,
+// a path that does not exist is not an error and yields nil. A path that runs
+// through a regular file is an error on Unix (ENOTDIR) but, as with os on
+// Windows, counts as not existing there.
 func (fs *FileSystem) RemoveAll(name string) error {
-	wd := fs.root
-	abs := name
-	if !path.IsAbs(abs) {
-		abs = path.Join(fs.cwd, abs)
-		wd = fs.dir
+	parent, filename, err := fs.walkParent(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	child, err := wd.Resolve(name)
 	if err != nil {
 		return &os.PathError{Op: "remove", Path: name, Err: err}
 	}
-
-	parent := fs.root
-	dir, filename := path.Split(abs)
-	dir = path.Clean(dir)
-	if dir != "/" {
-		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
-		if err != nil {
-			return &os.PathError{Op: "remove", Path: dir, Err: err}
-		}
+	if isDotName(filename) {
+		return &os.PathError{Op: "remove", Path: name, Err: syscall.EINVAL}
 	}
+	entry := parent.Lookup(filename)
+	if entry == nil {
+		return nil
+	}
+	child := entry.Inode
 
 	// Clean up data before unlinking
 	fs.cleanupData(child)
 
 	child.UnlinkAll()
-	return parent.Unlink(filename)
+	parent.Unlink(filename)
+	return nil
 }
 
-//Chtimes changes the access and modification times of the named file
+// Chtimes changes the access and modification times of the named file,
+// following symbolic links.
 func (fs *FileSystem) Chtimes(name string, atime time.Time, mtime time.Time) error {
-	var err error
-	node := fs.root
-
-	name = inode.Abs(fs.cwd, name)
-	if name != "/" {
-		node, err = fs.root.Resolve(strings.TrimLeft(name, "/"))
-		if err != nil {
-			return err
-		}
+	node, err := fs.walk(name, true)
+	if err != nil {
+		return &os.PathError{Op: "chtimes", Path: name, Err: err}
 	}
 
 	node.SetAtime(atime)
@@ -448,93 +459,43 @@ func (fs *FileSystem) Chtimes(name string, atime time.Time, mtime time.Time) err
 	return nil
 }
 
-//Chown changes the owner and group ids of the named file
+// Chown changes the owner and group ids of the named file, following
+// symbolic links. Use Lchown to change a link itself.
 func (fs *FileSystem) Chown(name string, uid, gid int) error {
-	var err error
-	node := fs.root
-
-	name = inode.Abs(fs.cwd, name)
-	if name != "/" {
-		node, err = fs.root.Resolve(name)
-		if err != nil {
-			return err
-		}
+	node, err := fs.walk(name, true)
+	if err != nil {
+		return &os.PathError{Op: "chown", Path: name, Err: err}
 	}
 	node.Uid = uint32(uid)
 	node.Gid = uint32(gid)
 	return nil
 }
 
-//Chmod changes the mode of the named file to mode.
+// Chmod changes the mode of the named file to mode, following symbolic
+// links. As with os.Chmod, only the permission bits and the setuid,
+// setgid and sticky bits of mode are used; the file's type is unchanged.
 func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
-	var err error
-	node := fs.root
-
-	name = inode.Abs(fs.cwd, name)
-
-	if name != "/" {
-		node, err = fs.root.Resolve(strings.TrimLeft(name, "/"))
-		if err != nil {
-			return err
-		}
-	}
-	node.Mode = mode
-	return nil
-}
-
-// fileStat resolves symlinks and returns the final inode, with cycle detection
-func (fs *FileSystem) fileStat(cwd, name string) (*inode.Inode, error) {
-	// Initialize the visited map to track inodes we've seen during symlink traversal.
-	// This prevents infinite loops when symlinks form a cycle (e.g., a -> b -> a).
-	visited := make(map[uint64]bool)
-	return fs.fileStatWithVisited(cwd, name, visited)
-}
-
-// fileStatWithVisited is the internal implementation with cycle detection.
-// It recursively follows symlinks until reaching a non-symlink inode, tracking
-// visited inodes to detect and prevent infinite loops.
-func (fs *FileSystem) fileStatWithVisited(cwd, name string, visited map[uint64]bool) (*inode.Inode, error) {
-	name = inode.Abs(cwd, name)
-	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
+	node, err := fs.walk(name, true)
 	if err != nil {
-		return nil, &os.PathError{Op: "stat", Path: name, Err: err}
+		return &os.PathError{Op: "chmod", Path: name, Err: err}
 	}
-
-	// If this is not a symlink, we've found the final target - return it
-	if node.Mode&os.ModeSymlink == 0 {
-		return node, nil
-	}
-
-	// Detect symlink cycles: if we've already visited this inode during the current
-	// resolution chain, we have a loop (e.g., link1 -> link2 -> link1)
-	if visited[node.Ino] {
-		return nil, &os.PathError{Op: "stat", Path: name, Err: syscall.ELOOP}
-	}
-
-	// Mark this inode as visited to detect cycles in subsequent recursive calls
-	visited[node.Ino] = true
-
-	// Recursively resolve the symlink target. The target path is stored in fs.symlinks,
-	// and we resolve it relative to the symlink's directory (not the original cwd).
-	targetVal, ok := fs.symlinks.Load(node.Ino)
-	if !ok {
-		return nil, &os.PathError{Op: "stat", Path: name, Err: syscall.EINVAL}
-	}
-	target := targetVal.(string)
-	return fs.fileStatWithVisited(path.Dir(name), target, visited)
+	const settable = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	node.Mode = node.Mode&^settable | mode&settable
+	return nil
 }
 
 // Stat returns file information for the named file, following symbolic links.
 //
 // If the file is a symbolic link, Stat returns information about the file
-// the link points to. Returns an error if the file does not exist or if
-// a symbolic link loop is detected.
+// the link points to. Returns an error if the file does not exist, if the
+// path runs through something that is not a directory, or if a symbolic
+// link loop is detected.
 func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
-	if name == "/" {
-		return &fileinfo{"/", fs.root}, nil
+	node, err := fs.walk(name, true)
+	if err != nil {
+		return nil, &os.PathError{Op: "stat", Path: name, Err: err}
 	}
-	node, err := fs.fileStat(fs.cwd, name)
-	return &fileinfo{path.Base(name), node}, err
+	return &fileinfo{path.Base(name), node}, nil
 }
 
 // Lstat returns file information for the named file without following symbolic links.
@@ -542,15 +503,10 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 // Unlike Stat, if the file is a symbolic link, Lstat returns information
 // about the link itself. Returns an error if the file does not exist.
 func (fs *FileSystem) Lstat(name string) (os.FileInfo, error) {
-	if name == "/" {
-		return &fileinfo{"/", fs.root}, nil
-	}
-	name = inode.Abs(fs.cwd, name)
-	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
+	node, err := fs.walk(name, false)
 	if err != nil {
-		return nil, &os.PathError{Op: "remove", Path: name, Err: err}
+		return nil, &os.PathError{Op: "lstat", Path: name, Err: err}
 	}
-
 	return &fileinfo{path.Base(name), node}, nil
 }
 
@@ -559,15 +515,9 @@ func (fs *FileSystem) Lstat(name string) (os.FileInfo, error) {
 // Unlike Chown, if the file is a symbolic link, Lchown changes the ownership
 // of the link itself rather than the file it points to.
 func (fs *FileSystem) Lchown(name string, uid, gid int) error {
-	if name == "/" {
-		fs.root.Uid = uint32(uid)
-		fs.root.Gid = uint32(gid)
-		return nil
-	}
-	name = inode.Abs(fs.cwd, name)
-	node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
+	node, err := fs.walk(name, false)
 	if err != nil {
-		return err
+		return &os.PathError{Op: "lchown", Path: name, Err: err}
 	}
 
 	node.Uid = uint32(uid)
@@ -577,20 +527,15 @@ func (fs *FileSystem) Lchown(name string, uid, gid int) error {
 
 // Readlink returns the target of the named symbolic link.
 //
-// Returns an error if the file does not exist or is not a symbolic link.
+// Returns an error if the file does not exist. A file that exists but is
+// not a symbolic link yields an empty target and a nil error.
 func (fs *FileSystem) Readlink(name string) (string, error) {
-	var ino uint64
-	if name == "/" {
-		ino = fs.root.Ino
-	} else {
-		node, err := fs.root.Resolve(strings.TrimLeft(name, "/"))
-		if err != nil {
-			return "", err
-		}
-		ino = node.Ino
+	node, err := fs.walk(name, false)
+	if err != nil {
+		return "", &os.PathError{Op: "readlink", Path: name, Err: err}
 	}
 
-	targetVal, ok := fs.symlinks.Load(ino)
+	targetVal, ok := fs.symlinks.Load(node.Ino)
 	if !ok {
 		return "", nil
 	}
@@ -600,41 +545,28 @@ func (fs *FileSystem) Readlink(name string) (string, error) {
 // Symlink creates a symbolic link at newname pointing to oldname.
 //
 // The symlink stores oldname exactly as provided (it can be absolute or relative).
-// Returns an error if newname already exists or if the parent directory of
-// newname does not exist. Note: Unlike some implementations, the target (oldname)
-// does NOT need to exist - broken symlinks are valid.
+// Returns an *os.LinkError if newname already exists, if the parent directory
+// of newname does not exist, or if that parent path runs through something
+// that is not a directory. Note: Unlike some implementations, the target
+// (oldname) does NOT need to exist - broken symlinks are valid.
 func (fs *FileSystem) Symlink(oldname, newname string) error {
-	wd := fs.root
-	abs := newname
-	if !path.IsAbs(newname) {
-		abs = path.Join(fs.cwd, newname)
-		wd = fs.dir
-	}
-
-	// Check if newname already exists - symlinks cannot overwrite existing files
-	_, err := wd.Resolve(newname)
-	if err == nil {
-		return &os.PathError{Op: "symlink", Path: newname, Err: syscall.EEXIST}
-	}
-
-	// Resolve parent directory
-	dir, filename := path.Split(abs)
-	dir = path.Clean(dir)
-	parent := fs.root
-	if dir != "/" {
-		parent, err = fs.root.Resolve(strings.TrimLeft(dir, "/"))
-		if err != nil {
-			return &os.PathError{Op: "symlink", Path: newname, Err: err}
-		}
-	}
-
-	// Create symlink inode - symlinks store path as-is, target doesn't need to exist
-	newNode := fs.ino.New(os.ModeSymlink | 0777)
-
-	err = parent.Link(filename, newNode)
+	linkErr := &os.LinkError{Op: "symlink", Old: oldname, New: newname}
+	parent, filename, err := fs.walkParent(newname)
 	if err != nil {
-		return &os.PathError{Op: "symlink", Path: newname, Err: err}
+		linkErr.Err = err
+		return linkErr
 	}
+
+	// Symlinks cannot overwrite existing files
+	if filename == "" || parent.Lookup(filename) != nil {
+		linkErr.Err = syscall.EEXIST
+		return linkErr
+	}
+
+	// Create symlink inode - symlinks store path as-is, target doesn't need
+	// to exist. Link cannot fail: parent is a directory.
+	newNode := fs.ino.New(os.ModeSymlink | 0777)
+	parent.Link(filename, newNode)
 	fs.symlinks.Store(newNode.Ino, oldname)
 	return nil
 }
@@ -648,6 +580,10 @@ func (fs *FileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
 	}
 	defer f.Close()
 
+	// Like os.ReadDir, which opens with O_DIRECTORY, fail at open time.
+	if info, err := f.Stat(); err == nil && !info.IsDir() {
+		return nil, &os.PathError{Op: "open", Path: name, Err: syscall.ENOTDIR}
+	}
 	return f.ReadDir(-1)
 }
 
